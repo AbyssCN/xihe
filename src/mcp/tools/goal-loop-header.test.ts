@@ -69,8 +69,16 @@ describe('R-1 第 4 步: resultOut 头部 ledger 行', () => {
       goal: 'g', tier: 'complex', acceptance: { kind: 'exploratory', learningGoal: 'x', affordableLoss: '一轮' },
       stages: [], sources: [], repoContext: '', converged: true, rounds: 1, reusedNodes: [], outcome: 'success',
     };
-    const line = summarizeGoal({ ...base, loop }).split('\n').find((l) => l.startsWith('循环:'));
+    const out = summarizeGoal({ ...base, loop });
+    const line = out.split('\n').find((l) => l.startsWith('循环:'));
     expect(line).toBe('循环: 终审 2 次 (首判 fail · 对象 criterion) · 回灌 是 → green · 回灌后新派发 0 · 窄复审 pass · 派发 2 次 (卡 ok 2/3) · conductor 常驻 prompt 6400 字符 · 触碰 0 文件 / orphan 0 / missing 0');
+    // 判词原文必须到人手上 (smoke8-p5 抓到的缺口): 缺席时不印, 在场时各占一行。
+    // 证伪: 把 goal.ts 里那两条 lines.push 删掉 → 下面四条红。
+    expect(out).not.toContain('终审判词');
+    expect(out).not.toContain('窄复审判词');
+    const withText = summarizeGoal({ ...base, loop, verifierDissent: '首判: 边界条件没覆盖', recheckDissent: '复审: 已补测试且不修则红' });
+    expect(withText).toContain('终审判词 (首判): 首判: 边界条件没覆盖');
+    expect(withText).toContain('窄复审判词 (D-14 第二只眼): 复审: 已补测试且不修则红');
     expect(summarizeGoal(base)).not.toContain('循环:');
   });
 });

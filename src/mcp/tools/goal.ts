@@ -245,6 +245,13 @@ export function summarizeGoal(r: RunGoalResult): string {
         `${r.loop.conductorInfraFailure ? ` · ${r.loop.conductorInfraFailure.slice(0, 80)}` : ''}` +
         writeAgg,
     );
+    // 判词原文进人读面 (2026-09-04 冒烟 smoke8-p5 抓到): 终态文案一直写着「读 verifierDissent」, 而
+    // resultOut 从没印过它 —— 那句指引指向一个人手上不存在的东西。`recheckDissent` 同理: 没有它,
+    // `窄复审 pass` 就是无据的一个字 (该字段自己的注释写了这句, 冒烟照出来没兑现)。
+    // 截断 600 字符: 判词是散文, 全文进 md 会把这份给人扫的回执压垮; 全文仍在 RunGoalResult 上。
+    const cut = (t: string): string => (t.length > 600 ? `${t.slice(0, 600)}…(截断, 全文在 RunGoalResult)` : t);
+    if (r.verifierDissent) lines.push(`终审判词 (首判): ${cut(r.verifierDissent)}`);
+    if (r.recheckDissent) lines.push(`窄复审判词 (D-14 第二只眼): ${cut(r.recheckDissent)}`);
   }
   return lines.join('\n');
 }
