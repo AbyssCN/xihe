@@ -345,7 +345,8 @@ export function renderMarkdown(
  * 任一字段改名或改型 `bunx tsc --noEmit` 当场红。两个类型故意不同名 —— 同名更容易被当成
  * 同一个东西各改各的。
  */
-export type ReadoutRow = { nodes: unknown; shape_id: string | null };
+/** `created_at` 可选 (2026-09-04 修尺): 给了就按 §6.7 剔掉字段前的行; 没给 = 全当字段后 (老调用方逐字节同旧)。 */
+export type ReadoutRow = { nodes: unknown; shape_id: string | null; created_at?: number | string | null };
 
 export type SpeedupReadoutSummary = {
   /** 可量行的 speedup 中位;一行都不可量 → `null`(**不是** 0)。 */
@@ -358,7 +359,9 @@ export type SpeedupReadoutSummary = {
   shapeDeclRate: number;
 };
 
-export function summarizeReadout(rows: readonly ReadoutRow[]): SpeedupReadoutSummary | null {
+export function summarizeReadout(rowsIn: readonly ReadoutRow[]): SpeedupReadoutSummary | null {
+  // §6.7: 字段前的行「不适用」, 不进四个数的任何分母 (读数板与挖题站同一条规则, 不写第二份)。
+  const rows = rowsIn.filter((r) => !isPreDurationField(r.created_at));
   if (rows.length === 0) return null;
   const speedups: number[] = [];
   let excludedMissing = 0;
@@ -377,6 +380,22 @@ export function summarizeReadout(rows: readonly ReadoutRow[]): SpeedupReadoutSum
     excludedMissing,
     shapeDeclRate: declared / rows.length,
   };
+}
+
+/**
+ * §6.7 字段前史 (2026-09-04 修尺)。`durationMs` 落账从 C-1 (2026-08-19) 起才有;更早的行
+ * **不是「跑了但没记上」, 是「这条路不适用」**(仓规 §静默坑 1: NULL ≠ 0 ≠ 不适用)。
+ * 把它们算进 `excluded_missing` = 剔除规则吃掉自己的分母 (实测 527/761 被剔, 其中 494 行早于字段)。
+ * 阈值取 C-1 契约日 00:00Z (`docs/plan/2026-08-31-durationMs接线-执行契约.md`);`created_at` 秒/毫秒两制都认。
+ */
+export const DURATION_FIELD_EPOCH_S = Date.UTC(2026, 7, 19) / 1000;
+
+/** 行早于 durationMs 字段 → true(不可量, 不进 excluded_missing)。`created_at` 缺席 = 不知道 → 当作字段后(保守: 进剔除计数, 不进「不适用」)。 */
+export function isPreDurationField(createdAt: unknown): boolean {
+  const n = typeof createdAt === 'number' ? createdAt : typeof createdAt === 'string' ? Number(createdAt) : NaN;
+  if (!Number.isFinite(n)) return false;
+  const sec = n > 1e12 ? n / 1000 : n;
+  return sec < DURATION_FIELD_EPOCH_S;
 }
 
 /**
@@ -420,14 +439,16 @@ if (import.meta.main) {
     process.exit(1);
   }
 
-  let rows: { nodes: string | null; shape_id: string | null; outcome: string | null }[];
+  let rows: { nodes: string | null; shape_id: string | null; outcome: string | null; entry: string | null; created_at: number | string | null }[];
   try {
     rows = db
-      .query(`SELECT nodes, shape_id, outcome FROM omd_dag_runs`)
+      .query(`SELECT nodes, shape_id, outcome, entry, created_at FROM omd_dag_runs`)
       .all() as {
       nodes: string | null;
       shape_id: string | null;
       outcome: string | null;
+      entry: string | null;
+      created_at: number | string | null;
     }[];
   } catch (e) {
     console.error(
@@ -441,13 +462,17 @@ if (import.meta.main) {
    * 具体 shape 行按本范围内出现过的已知 shape_id 建立(即便样本量为 0)。
    */
   function buildReport(
-    scopeRows: typeof rows,
+    scopeRowsIn: typeof rows,
     title: string,
   ): string {
+    let scopeRows = scopeRowsIn;
     const counters: RunCounters = {
       excludedMissing: 0,
       excludedInvalid: 0,
     };
+    // §6.7: 字段前的行不进任何剔除桶 —— 单独计数, 报在表尾。
+    const preField = scopeRows.filter((r) => isPreDurationField(r.created_at)).length;
+    scopeRows = scopeRows.filter((r) => !isPreDurationField(r.created_at));
 
     // 先扫一遍本范围内的已知 shape_id,定具体 shape 行的集合。
     const knownShapeIds = new Set<string>();
@@ -507,13 +532,24 @@ if (import.meta.main) {
       speedups: buckets[label]!,
     }));
 
-    return renderMarkdown(title, groups, counters);
+    // 中位数坐在 1.000 平台上时不动 (220 可量图里 149 张恰为 1.0), 补一个会动的数: 大于 1 的占比。
+    const all = buckets.absent!.concat(buckets.known!, buckets.unknown!);
+    const gt1 = all.filter((x) => x > 1.0001).length;
+    return (
+      renderMarkdown(title, groups, counters) +
+      `speedup>1: ${gt1} / ${all.length}\n` +
+      `pre_field: ${preField} (rows before durationMs was recorded, ${new Date(DURATION_FIELD_EPOCH_S * 1000).toISOString().slice(0, 10)}; not applicable, not "missing")\n`
+    );
   }
 
   const fullMd = buildReport(rows, '全量');
   const successRows = rows.filter((r) => r.outcome === 'success');
   const successMd = buildReport(successRows, "outcome='success'");
+  // §6.7 分入口: solve 走 SDD 编译的平铺链, 串行是**构造使然**, 加速比 1.0 量的是契约形状不是 conductor;
+  // 只有 run / dag_run_plan 这类 conductor 自画的图, O3a 才量得到规划质量。两桶分开报, 不合并。
+  const runMd = buildReport(rows.filter((r) => r.entry === 'run' || r.entry === 'dag_run_plan'), "entry∈{run,dag_run_plan} (conductor 自画图)");
+  const solveMd = buildReport(rows.filter((r) => r.entry === 'solve'), "entry='solve' (SDD 平铺链, 串行为构造使然)");
 
-  // 两张表之间放一个空行 —— renderMarkdown 末尾各带一个 `\n`,中间再加一个 `\n` 共两换行 = 一空行。
-  process.stdout.write(fullMd + '\n' + successMd);
+  // 表之间放一个空行 —— renderMarkdown 末尾各带一个 `\n`,中间再加一个 `\n` 共两换行 = 一空行。
+  process.stdout.write([fullMd, successMd, runMd, solveMd].join('\n'));
 }

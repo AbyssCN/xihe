@@ -107,7 +107,7 @@ export function defaultMineIO(cwd: string): MineIO {
       try {
         const db = new Database(p, { readonly: true });
         const rows = db
-          .query('select nodes, shape_id from omd_dag_runs')
+          .query('select nodes, shape_id, created_at from omd_dag_runs')
           .all() as ReadoutRow[];
         db.close();
         const summary = summarizeReadout(rows);

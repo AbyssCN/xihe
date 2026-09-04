@@ -157,18 +157,23 @@ describe('readout 矿源真有源 (缺口 2)', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'omd-mine-readout-'));
     mkdirSync(join(tmp, '.omd'), { recursive: true });
     const db = new Database(join(tmp, '.omd', 'dag-runs.db'));
-    db.run('CREATE TABLE omd_dag_runs (nodes TEXT, shape_id TEXT, outcome TEXT)');
+    // 生产表恒有 created_at (dag-record INSERT 列表); 2026-09-04 修尺后矿源按它剔字段前史,
+    // 夹具两行给一个**字段后**的时刻 → 仍按「缺 duration 整图剔除」计数 (§6.7)。
+    db.run('CREATE TABLE omd_dag_runs (nodes TEXT, shape_id TEXT, outcome TEXT, created_at INTEGER)');
     const nodes = JSON.stringify([
       { id: 'A', deps: [], durationMs: null },
       { id: 'B', deps: ['A'], durationMs: 100 },
     ]);
-    db.run('INSERT INTO omd_dag_runs (nodes, shape_id, outcome) VALUES (?, NULL, ?)', [
+    const postField = Date.UTC(2026, 7, 20) / 1000;
+    db.run('INSERT INTO omd_dag_runs (nodes, shape_id, outcome, created_at) VALUES (?, NULL, ?, ?)', [
       nodes,
       'success',
+      postField,
     ]);
-    db.run('INSERT INTO omd_dag_runs (nodes, shape_id, outcome) VALUES (?, NULL, ?)', [
+    db.run('INSERT INTO omd_dag_runs (nodes, shape_id, outcome, created_at) VALUES (?, NULL, ?, ?)', [
       nodes,
       'success',
+      postField,
     ]);
     db.close();
     return tmp;

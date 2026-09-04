@@ -22,6 +22,8 @@ import {
   median,
   parseNodesColumn,
   renderMarkdown,
+  isPreDurationField,
+  DURATION_FIELD_EPOCH_S,
   shapeBucket,
   summarizeReadout,
   type ReadoutRow,
@@ -350,5 +352,40 @@ describe('summarizeReadout —— 夜链矿源摘要 (缺口 2)', () => {
     const s = summarizeReadout([{ nodes: 'not json', shape_id: null }]);
     expect(s!.measurable).toBe(0);
     expect(s!.excludedMissing).toBe(0);
+  });
+});
+
+describe('§6.7 字段前史 isPreDurationField (2026-09-04 修尺)', () => {
+  test('C-1 契约日之前 → true; 之后 → false; 秒/毫秒两制同判; 缺席 → false (保守进剔除桶)', () => {
+    const day = 86_400;
+    expect(isPreDurationField(DURATION_FIELD_EPOCH_S - day)).toBe(true);
+    expect(isPreDurationField((DURATION_FIELD_EPOCH_S - day) * 1000)).toBe(true);
+    expect(isPreDurationField(DURATION_FIELD_EPOCH_S)).toBe(false);
+    expect(isPreDurationField(String(DURATION_FIELD_EPOCH_S + day))).toBe(false);
+    expect(isPreDurationField(null)).toBe(false);
+    expect(isPreDurationField(undefined)).toBe(false);
+    // 反向自检: 阈值真是 2026-08-19 00:00Z —— 改成别的日子这条即红。
+    expect(new Date(DURATION_FIELD_EPOCH_S * 1000).toISOString()).toBe('2026-08-19T00:00:00.000Z');
+  });
+});
+
+describe('§6.7 summarizeReadout 剔字段前史 (2026-09-04 修尺)', () => {
+  test('带 created_at 早于阈值的行不进任何分母; 不带 created_at 的行逐字节同旧', () => {
+    const okNodes = JSON.stringify([{ id: 'a', deps: [], durationMs: 10 }, { id: 'b', deps: ['a'], durationMs: 10 }]);
+    const missNodes = JSON.stringify([{ id: 'a', deps: [], durationMs: null }]);
+    const pre = DURATION_FIELD_EPOCH_S - 86_400;
+    const post = DURATION_FIELD_EPOCH_S + 86_400;
+    const s = summarizeReadout([
+      { nodes: okNodes, shape_id: null, created_at: post },
+      { nodes: missNodes, shape_id: null, created_at: post },
+      { nodes: missNodes, shape_id: null, created_at: pre }, // 字段前: 不适用
+      { nodes: missNodes, shape_id: null, created_at: pre },
+    ]);
+    expect(s).not.toBeNull();
+    expect(s!.measurable).toBe(1);
+    expect(s!.excludedMissing).toBe(1); // 反向: 把 filter 删掉 → 这里读 3 即红
+    // 没给 created_at → 全当字段后 (老调用方不变)
+    const legacy = summarizeReadout([{ nodes: missNodes, shape_id: null }, { nodes: missNodes, shape_id: null }]);
+    expect(legacy!.excludedMissing).toBe(2);
   });
 });
