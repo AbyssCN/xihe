@@ -19,6 +19,8 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync }
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 
+import { findExecToolchain, resolveToolchainBinds, type ExecToolchain } from './toolchain';
+
 /**
  * DNS 解析所需的额外绑定 (WSL2: /etc/resolv.conf 是指向 /mnt/wsl/resolv.conf 的符号链接, ro-bind /etc 时
  * 链接目标不在 jail 内 → 无 DNS → leaf 连不上 model API)。把真身按**自己的绝对路径**绑进去, /etc 里的
@@ -113,45 +115,18 @@ export function collectNodeModules(root: string, maxDepth = 4): string[] {
   return [...out];
 }
 
-/** node 工具链在宿主上的位置。 */
-export interface NodeToolchain {
-  /** 含 `node` 可执行的目录 (真身), 进 jail 的 PATH。 */
-  binDir: string;
-  /** binDir 的父 —— 含 `bin/` 与 `lib/`, **要绑的是这个**。 */
-  rootDir: string;
-}
+/** node 工具链在宿主上的位置。@deprecated 用 {@link findExecToolchain}('node');保留是因为已有调用点与测试。 */
+export type NodeToolchain = ExecToolchain;
 
 let nodeToolchainCache: { v: NodeToolchain | null } | null = null;
 
 /**
- * 从**宿主** PATH 上找 node,返它的 bin 目录与安装根。找不到 → null (退回原行为)。
- *
- * ⚠ 为什么 omd 自己跑得动却要单独找 node (2026-09-04 plana 实账): jail 的 PATH 原本是
- * `dirname(process.execPath):/usr/bin:/bin`,而 omd 跑在 **bun** 上 → jail 里**只有 bun**。
- * 仓的验收命令是 `npx tsc` / `npx vitest` 时全部 `command not found`;叶子退而用 bun 顶替,
- * 而 bun 的 subpath 解析与 node 不一致,**假报 38 个测试文件失败** → 基线不可复现 → 硬约束一条都判不了。
- *
- * ⚠ 绑的是**安装根不是 bin**: `npm`/`npx` 是指向 `../lib/node_modules/npm/bin/*.js` 的**相对**软链,
- * 只绑 bin 目录时那条链在 jail 里断掉 (手工绕过这个 bug 时原样踩过一次: node 能跑而 npm 找不到)。
- *
- * 取 realpath 再取 dirname 而不是直接用 PATH 上那一段: fnm/nvm 一类版本管理器在 PATH 上放的是
- * **每 shell 即弃**的目录 (`/run/user/…/fnm_multishells/…`),那个路径在别的进程里根本不存在。
+ * 宿主上的 node 安装位置。逻辑已搬进 `hooks/toolchain.ts`(那里按**生态表**统一处理,
+ * node 只是表里的一行)—— 本函数是薄壳,理由与两条 ⚠ 见 {@link findExecToolchain}。
  */
 export function findNodeToolchain(): NodeToolchain | null {
-  if (nodeToolchainCache) return nodeToolchainCache.v;
-  let v: NodeToolchain | null = null;
-  for (const dir of (process.env.PATH ?? '').split(':')) {
-    if (!dir) continue;
-    const cand = join(dir, 'node');
-    if (!existsSync(cand)) continue;
-    const r = tryRealpath(cand);
-    if (!r.path) continue; // r.err = 竞态/权限; 继续找 PATH 的下一段
-    const binDir = dirname(r.path);
-    v = { binDir, rootDir: dirname(binDir) };
-    break;
-  }
-  nodeToolchainCache = { v };
-  return v;
+  if (!nodeToolchainCache) nodeToolchainCache = { v: findExecToolchain('node') };
+  return nodeToolchainCache.v;
 }
 
 /**
@@ -160,8 +135,8 @@ export function findNodeToolchain(): NodeToolchain | null {
  */
 export function defaultRoBinds(root: string): string[] {
   const bunDir = dirname(process.execPath);
-  const node = findNodeToolchain();
-  return [...new Set([bunDir, ...(node ? [node.rootDir] : []), ...collectNodeModules(root)])];
+  const tc = resolveToolchainBinds(root);
+  return [...new Set([bunDir, ...tc.roBinds, ...collectNodeModules(root)])];
 }
 
 /** pi agent dir 里的大只读件 (rw 副本排除、jail 内 ro 叠挂): 依赖/扩展机器 + 宿主私有 sessions。 */
@@ -265,6 +240,11 @@ export function bwrapArgs(root: string, roBinds: string[], opts: BwrapOpts = {})
     args.push('--ro-bind', opts.gitBinds.commonDir, opts.gitBinds.commonDir);
     if (opts.gitBinds.gitDir !== opts.gitBinds.commonDir) args.push('--bind', opts.gitBinds.gitDir, opts.gitBinds.gitDir);
   }
+  // 生态的 HOME 缓存/配置 (Playwright 浏览器、pnpm store、~/.npmrc 的 registry token、~/.gitconfig 的
+  // 提交身份 …): jail 的 HOME 是 /tmp, 所以 dest 落在 /tmp 下的**同一相对位置**。
+  // ⚠ 必须排在 `--tmpfs /tmp` 之后 —— bwrap 按给定顺序叠挂, 反了就被 tmpfs 整个盖掉。
+  const toolchain = resolveToolchainBinds(root);
+  for (const h of toolchain.homeBinds) args.push('--ro-bind', h.src, h.dest);
   args.push('--chdir', root);
   // pi agent dir 分层挂载 (2026-07-25 三轮实证): HOME=/tmp 后 worker 缺 /tmp/.pi/agent →
   // 注册制 provider (mimo-platform/opencode-go/…) 全消失, leaf 全军覆没 leafTokens=0。
@@ -285,11 +265,10 @@ export function bwrapArgs(root: string, roBinds: string[], opts: BwrapOpts = {})
   // pi bash 工具往 os.tmpdir() 写日志 → 未挂载路径 ENOENT → worker 停摆 → 超时 SIGKILL 137。
   // jail 内 tmp 一律指向 tmpfs /tmp (hermetic, 不 bind 宿主 cache)。
   for (const k of ['TMPDIR', 'TEMP', 'TMP']) args.push('--setenv', k, '/tmp');
-  // PATH: bun (omd 自己的运行时) + node 的 bin (仓的验收命令基本都是 npx/npm) + 系统。
-  // ⚠ 缺 node 那一段的代价见 findNodeToolchain 的注 —— 四个 run 零产出, 而症状伪装成「模型不行」。
-  // 找不到 node → 退回原行为 (纯 bun 仓照旧能跑), 不因为找不到就拦。
-  const nodeBin = findNodeToolchain()?.binDir;
-  const pathDirs = [...new Set([dirname(process.execPath), ...(nodeBin ? [nodeBin] : []), '/usr/bin', '/bin'])];
+  // PATH: bun (omd 自己的运行时) + **仓用到的每个生态**的可执行目录 + 系统。
+  // ⚠ 缺 node 那一段的代价见 hooks/toolchain 的模块头 —— 四个 run 零产出, 症状伪装成「模型不行」。
+  // 一个都找不到 → 退回原行为 (纯 bun 仓照旧能跑), 不因为找不到就拦。
+  const pathDirs = [...new Set([dirname(process.execPath), ...toolchain.pathDirs, '/usr/bin', '/bin'])];
   args.push('--setenv', 'PATH', pathDirs.join(':'));
   return args;
 }

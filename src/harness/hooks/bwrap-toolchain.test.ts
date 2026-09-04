@@ -60,6 +60,24 @@ function makeWorkspacesTree(): { root: string; expected: string[] } {
   return { root, expected: dirs.map((d) => join(root, d)) };
 }
 
+describe('挂载面最小 —— 非 JS 仓不该被绑上 node', () => {
+  // 接生态表之后的新性质 (2026-09-04)。此前 node 是无条件绑的。
+  // 证伪方式: 把 defaultRoBinds 改回无条件加 findNodeToolchain()?.rootDir → 本条红。
+  test('root 里没有 package.json → node 安装根不进 roBinds', () => {
+    const tc = findNodeToolchain();
+    if (!tc) {
+      console.warn('[skip] 宿主 PATH 上没有 node —— 本条跳过, 不是通过');
+      return;
+    }
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'omd-nojs-')));
+    try {
+      expect(defaultRoBinds(root)).not.toContain(tc.rootDir);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('② collectNodeModules —— workspaces monorepo 的嵌套依赖', () => {
   // 证伪方式: 把 collectNodeModules 换回只返 findNodeModules(root) 的单值 → 本条红。
   test('根 + 每个子包的 node_modules 全部收进来', () => {
@@ -126,6 +144,7 @@ describe('① node 工具链进 jail —— PATH 与绑定', () => {
       return;
     }
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'omd-path-')));
+    writeFileSync(join(root, 'package.json'), '{}'); // 生态表按 marker 认仓 —— 没它就不绑 node
     try {
       const p = pathEnv(bwrapArgs(root, defaultRoBinds(root)));
       expect(p).not.toBeNull();
@@ -144,6 +163,7 @@ describe('① node 工具链进 jail —— PATH 与绑定', () => {
       return;
     }
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'omd-bind-')));
+    writeFileSync(join(root, 'package.json'), '{}');
     try {
       const sources = bindSources(bwrapArgs(root, defaultRoBinds(root)));
       expect(sources.some((s) => s === tc.rootDir || tc.binDir.startsWith(`${s}/`) || s === tc.binDir)).toBe(true);

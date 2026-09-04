@@ -36,6 +36,8 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { detectEcosystems } from './toolchain';
+
 export type JailProblemLevel = 'fatal' | 'warn';
 
 export interface JailProblem {
@@ -188,17 +190,14 @@ export function checkJailArgv(input: JailPreflightInput, deps: JailPreflightDeps
   //    叶子退而用 bun 顶替, bun 的 subpath 解析与 node 不一致, 假报一批测试失败, 于是基线不可复现,
   //    硬约束一条都判不了。这正是 warn 那一栏写的「会让读数失真但不一定跑不动」。
   //    (真代价: 四个 run 零产出, 而四份报告都把它描述成环境问题 —— 它们是对的, 只是没人在起跑前看。)
-  if (exists(join(root, 'package.json'))) {
-    const jailPath = setenvValue(argv, 'PATH') ?? '';
-    const hasNode = jailPath
-      .split(':')
-      .filter(Boolean)
-      .some((d) => exists(join(d, 'node')));
-    if (!hasNode) {
+  const jailPath = (setenvValue(argv, 'PATH') ?? '').split(':').filter(Boolean);
+  for (const eco of detectEcosystems(root, exists)) {
+    const got = eco.executables.find((n) => jailPath.some((d) => exists(join(d, n))));
+    if (!got) {
       problems.push({
         level: 'warn',
-        what: `仓有 package.json, 而 jail 的 PATH 里没有 node (PATH=${jailPath || '(空)'})`,
-        fix: '看 findNodeToolchain 为什么返 null (宿主 PATH 上没有 node?)。⚠ 真代价是**读数被写成假的**: 叶子会用 bun 顶替 npx, 而 bun 的 subpath 解析与 node 不一致 → 假报测试失败 → 基线不可复现',
+        what: `仓用到 ${eco.id} (marker: ${eco.markers.join(' / ')}), 而 jail 的 PATH 里 ${eco.executables.join(' / ')} 一个都没有`,
+        fix: `看 hooks/toolchain 的 findExecToolchain 为什么找不到 (宿主 PATH 上有吗?)。⚠ 真代价是**读数被写成假的**: 叶子会拿手边的运行时顶替 (plana 实账: 用 bun 顶 npx, 而 bun 的 subpath 解析与 node 不一致 → 假报 38 个测试失败 → 基线不可复现)`,
       });
     }
   }

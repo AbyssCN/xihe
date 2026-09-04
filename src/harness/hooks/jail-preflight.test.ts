@@ -43,32 +43,33 @@ const idRealpath = { realpath: (p: string) => p };
 const jsRepo = (over: { nodeOnPath?: boolean; workspaces?: boolean } = {}) => ({
   realpath: (p: string) => p,
   exists: (p: string) => {
-    if (p === `${ROOT}/package.json`) return true;
+    // 仓根下**只有** package.json 存在 —— 否则生态表会把 Cargo.toml/go.mod 之类也当命中
+    if (p.startsWith(`${ROOT}/`)) return p === `${ROOT}/package.json`;
     if (p.endsWith('/node')) return over.nodeOnPath ?? false;
     return true;
   },
   readText: () => JSON.stringify(over.workspaces ? { workspaces: ['apps/*'] } : { name: 'x' }),
 });
 
-describe('⑥ jail 的 PATH 里有没有 node —— 四个 run 零产出的那一条', () => {
+describe('⑥ 探到的生态, 它的可执行在不在 jail 的 PATH 上 —— 四个 run 零产出的那一条', () => {
   const withPath = (dirs: string) => [...okArgv(), '--setenv', 'PATH', dirs];
 
   // 证伪方式: 把 checkJailArgv 里 ⑥ 那段删掉 → 本条红。
   test('仓有 package.json 而 PATH 里没有 node → warn, 且判词点名「读数被写成假的」', () => {
     const ps = checkJailArgv(base({ argv: withPath('/home/u/.bun/bin:/usr/bin:/bin') }), jsRepo({ nodeOnPath: false }));
-    const hit = ps.find((x) => x.what.includes('没有 node'));
+    const hit = ps.find((x) => x.what.includes('仓用到 node'));
     expect(hit?.level).toBe('warn');
     expect(hit?.fix).toContain('读数被写成假的');
   });
 
   test('PATH 里有 node → 不报', () => {
     const ps = checkJailArgv(base({ argv: withPath('/opt/node/bin:/usr/bin:/bin') }), jsRepo({ nodeOnPath: true }));
-    expect(ps.some((x) => x.what.includes('没有 node'))).toBe(false);
+    expect(ps.some((x) => x.what.includes('仓用到 node'))).toBe(false);
   });
 
   test('不是 JS 仓 (无 package.json) → 不报 (纯 Python/Rust 仓不该被这条打扰)', () => {
-    const deps = { ...jsRepo({ nodeOnPath: false }), exists: (p: string) => !p.endsWith('/package.json') };
-    expect(checkJailArgv(base({ argv: withPath('/x/bin') }), deps).some((x) => x.what.includes('没有 node'))).toBe(false);
+    const deps = { ...jsRepo({ nodeOnPath: false }), exists: (p: string) => !p.startsWith(`${ROOT}/`) };
+    expect(checkJailArgv(base({ argv: withPath('/x/bin') }), deps).some((x) => x.what.includes('仓用到'))).toBe(false);
   });
 });
 
