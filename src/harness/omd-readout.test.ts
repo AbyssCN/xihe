@@ -1904,7 +1904,7 @@ describe('omd-readout · ⑲ 编排循环 (R-1 第 4 步, 2026-09-03)', () => {
     expect(lp.llmCalls).toEqual({ conductor: 20, worker: 18, conductorPerRun: 20, workerPerRun: 9, unmeasuredConductorRuns: 1, unmeasuredWorkerNodes: 1 });
     // D-14 窄复审上线后 (2026-09-04): 回灌那条 run 付 2 次调用 (全量终审 1 + 窄复审 1), 判词 ≤ 2。
     // 另一个父行是**上线前形态**的老记录 (无 recheck 字段) → 进 unknown, 不并进 skipped。
-    expect(lp.verifier).toEqual({ calls: 3, perRun: 1.5, firstFail: 1, reinjected: 1, recheck: { pass: 1, fail: 0, error: 0, skipped: 0, unknown: 1 } });
+    expect(lp.verifier).toEqual({ calls: 3, perRun: 1.5, firstFail: 1, reinjected: 1, recheck: { pass: 1, unproven: 0, fail: 0, error: 0, skipped: 0, unknown: 1 } });
     // 回灌蒸发: 分母 = 回灌过的 (只有 P1); P1 回灌后零新派发 ∧ 绿 → 1/1。P2 没回灌不进分母 (设计 §5 的公式; §6 例子里的「1/2」把没回灌的也算进了分母, 以 §5 为准)。
     expect(lp.evaporation).toEqual({ numerator: 1, denominator: 1, rate: 1, unknown: 0 });
     expect(lp.cards.calls).toBe(4);

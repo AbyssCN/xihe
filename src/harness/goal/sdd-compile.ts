@@ -214,7 +214,6 @@ export interface FaceExpansion {
  * 同一份实现。所以「早说 = lint / 晚拒 = 误伤」的分工在今天并不存在, 别照那个口径读。
  * 扩容的可见出口有两个, 都是④告知层 (只报不拦): `logger.info` 的 `expansions` 记录,
  * 和派工文本里那句「已授权你改, 但**不要求**改」。
- * ponytail: 扩容记录还没进点火回执 (`renderIgnitionForecast`) —— 作者今天要翻日志才看得到。
  *
  * ## 不会造写集相交
  *
@@ -226,6 +225,8 @@ export interface FaceExpansion {
  * 反向自检 (仓规: 改闸必须当场证伪): `registration-faces.test.ts` 断言扩容后的写集
  * 逐个含 face; 把 `host.writeSet.push` 那行删掉, 那些 test 当场由绿转红。
  */
+// 格式照 debt-scan.MARKER_RE: 单行写完 · 第一个逗号前是天花板 · 逗号后是升级触发。
+// ponytail: 扩容记录只进 logger 不进点火回执, 有人漏看「本片被授权改了登记面」时接进 renderIgnitionForecast
 function expandRegistrationFaces(
   slices: readonly SddSlice[],
 ): { readonly slices: readonly SddSlice[]; readonly expansions: readonly FaceExpansion[] } {

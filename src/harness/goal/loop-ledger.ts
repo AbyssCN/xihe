@@ -158,14 +158,18 @@ export interface LoopLedger {
     /** 回灌后终局; 没回灌 (含基建守卫拦住) = 'skipped'。 */
     afterReinject: 'green' | 'red' | 'no-oracle' | 'skipped';
     /**
-     * D-14 窄复审读数 (2026-09-04)。四格互斥, **别把 'skipped' 与 'error' 并掉** (§静默坑 1):
-     *  · 'pass'    复审判首判 finding 已修 → 放行;
+     * D-14 窄复审读数 (2026-09-04)。五格互斥, **别把 'skipped' / 'error' / 'unproven' 并掉** (§静默坑 1):
+     *  · 'pass'    复审拿到证据判首判 finding 已修 → 放行;
+     *  · 'unproven' 复审拿不出反证、也确认不了修好 → **同样放行**(oracle 绿是 prior, 推翻它要反证),
+     *              但与干净 pass 分开记: 这一格是「这道闸这次什么都没量到」, 读侧要能数出它的占比。
+     *              合并进 'pass' 就会把「确认修好了」与「没能确认」读成同一件事 (code80-p5 的
+     *              3/8 假阳性正是这两者被并在 fail 一侧造成的, 反过来并进 pass 一侧同样有害);
      *  · 'fail'    复审判仍没修 → verifier-rejected (机械 oracle 绿也不算);
      *  · 'error'   复审调不通 (判卷官坏了) → fail-open 按 oracle 念, 不因判官故障改终态;
      *  · 'skipped' 没跑复审 —— 没回灌, 或回灌后 oracle 已经红 (那时终态本来就是 verifier-rejected,
      *              再花一次跨模型调用买不到任何新信息)。
      */
-    recheck: 'pass' | 'fail' | 'error' | 'skipped';
+    recheck: 'pass' | 'unproven' | 'fail' | 'error' | 'skipped';
   };
   /** conductor 节点基建类败因 (D-14 守卫); 缺席 = 没发生。 */
   conductorInfraFailure?: string;

@@ -680,7 +680,7 @@ export interface ReadoutResult {
      */
     verifier: {
       calls: number; perRun: number | null; firstFail: number; reinjected: number;
-      recheck: { pass: number; fail: number; error: number; skipped: number; unknown: number };
+      recheck: { pass: number; unproven: number; fail: number; error: number; skipped: number; unknown: number };
     };
     /**
      * 回灌蒸发 = reinjected ∧ afterReinject 'green' ∧ 回灌后零新派发 (dispatches.length === dispatchesBeforeReinject)。
@@ -1393,7 +1393,7 @@ function emptyLoopReadout(): ReadoutResult['loop_readout'] {
   return {
     parents: 0, childRows: 0, width: [], depth: [], widthStats: null, depthStats: null,
     speedup: { ratios: [], median: null, unmeasurable: 0 },
-    verifier: { calls: 0, perRun: null, firstFail: 0, reinjected: 0, recheck: { pass: 0, fail: 0, error: 0, skipped: 0, unknown: 0 } },
+    verifier: { calls: 0, perRun: null, firstFail: 0, reinjected: 0, recheck: { pass: 0, unproven: 0, fail: 0, error: 0, skipped: 0, unknown: 0 } },
     evaporation: { numerator: 0, denominator: 0, rate: null, unknown: 0 },
     cards: { calls: 0, ok: 0, rejectedSchema: 0, help: 0, rejectedCompile: 0, childRunError: 0, firstPassRate: null, byCard: {}, readOnlyShellBlocked: 0 },
     dispatches: { total: 0, perRun: null, briefTrue: 0, briefFalse: 0, briefNull: 0, briefReproRate: null },
@@ -2612,7 +2612,8 @@ function printNewSegments(r: ReadoutResult, dbPath: string): void {
     console.log(`   并行宽度 [${lp.width.join(',')}]${lp.widthStats ? ` min/中位/max ${lp.widthStats.min}/${lp.widthStats.median}/${lp.widthStats.max}` : ''} · 关键路径深度 [${lp.depth.join(',')}]${lp.depthStats ? ` min/中位/max ${lp.depthStats.min}/${lp.depthStats.median}/${lp.depthStats.max}` : ''}`);
     console.log(`   加速比: 中位 ${f2(lp.speedup.median)} (Σ子节点墙钟 / conductor 墙钟; 判词 > 1) · ${lp.speedup.unmeasurable} 个 run 因 durationMs 缺席不可算`);
     console.log(`   终审: 调用 ${lp.verifier.calls} (${f2(lp.verifier.perRun)}/run, 判词 ≤ 2) · 首判红 ${lp.verifier.firstFail} · 回灌 ${lp.verifier.reinjected}`);
-    console.log(`   D-14 窄复审: 修好 ${lp.verifier.recheck.pass} · 仍没修 ${lp.verifier.recheck.fail} · 判官调不通 ${lp.verifier.recheck.error} · 没触发 ${lp.verifier.recheck.skipped} · 上线前老记录 ${lp.verifier.recheck.unknown}`);
+    // 'unproven' 单列: 它是「放行但这次什么都没量到」, 并进 pass 会把闸的有效触发率读虚高。
+    console.log(`   D-14 窄复审: 确认修好 ${lp.verifier.recheck.pass} · 未能确认(放行) ${lp.verifier.recheck.unproven} · 拿到反证判没修 ${lp.verifier.recheck.fail} · 判官调不通 ${lp.verifier.recheck.error} · 没触发 ${lp.verifier.recheck.skipped} · 上线前老记录 ${lp.verifier.recheck.unknown}`);
     console.log(`   回灌蒸发率: ${lp.evaporation.numerator}/${lp.evaporation.denominator} = ${pct(lp.evaporation.rate)} (回灌后零新派发且 oracle 绿; 老记录没分界线 ${lp.evaporation.unknown} 个不进分母)`);
     console.log(`   工具首次直达率: ${lp.cards.ok}/${lp.cards.calls} = ${pct(lp.cards.firstPassRate)} · zod 拒 ${lp.cards.rejectedSchema} · help ${lp.cards.help} · 编译拒 ${lp.cards.rejectedCompile} · 子 run 抛错 ${lp.cards.childRunError} · 只读 bash 拒 ${lp.cards.readOnlyShellBlocked} · 按卡 ${Object.entries(lp.cards.byCard).map(([k, v]) => `${k}×${v}`).join(' ') || '—'}`);
     console.log(`   brief 含复现输出 (启发式): ${lp.dispatches.briefTrue}/${lp.dispatches.briefTrue + lp.dispatches.briefFalse} = ${pct(lp.dispatches.briefReproRate)} · 无 brief 槽 ${lp.dispatches.briefNull}`);

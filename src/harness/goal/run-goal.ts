@@ -94,6 +94,7 @@ import {
   compileOrchestratingLoop,
   withReinjectedFinding,
   renderRecheckTask,
+  RECHECK_UNPROVEN_PREFIX,
   checkCriterionFreeze,
   renderCriterionFreezeTruth,
 } from './orchestrating-loop';
@@ -901,6 +902,20 @@ export const TERMINAL_RUBRIC_UNWIRED = 'rubric-unwired';
  * 不新开一个 `RunOutcomeKind` (理由见 `RunGoalResult.terminalLabel` 的文档注释)。
  */
 export const TERMINAL_CRITERION_INCONCLUSIVE = 'criterion-inconclusive';
+
+/**
+ * 1-B 终审否决**判据**时的终态字面 (2026-09-04, code80-p5 读数)。同上一格的"归因不是判红"例外,
+ * 同一套接线, **不新开 `RunOutcomeKind`**。
+ *
+ * 为什么必须分出来: 1-B 判定 `target=criterion` 时不回灌 conductor 是对的 (判据量不出对错,
+ * 重跑实装没有意义), 但终态仍与「实装没修好」共用 `verifier-rejected` —— 于是「判据坏」被念成了
+ * 「活没干成」。**code80-p5 实测代价: 3 题 bench 测试 12/12 · 12/12 · 13/13 全过, 被记成失败。**
+ * 两格的下一步相反: 这一格是 INV-4 判据重建, 那一格是重跑实装。念错就把人指到错误的下一步。
+ *
+ * ⚠ 它**不翻** `converged` / `outcome` —— 被否决的判据上 oracle 绿仍不构成交付证据 (1-B 原立场未变),
+ * 改的只是「怎么念这件事」。想数「判据坏 vs 实装坏」的读侧按此字面分。
+ */
+export const TERMINAL_CRITERION_VETOED = 'criterion-vetoed';
 
 /**
  * INV-5 的判据: **这一格是"没接线", 不是"判红"**。
@@ -2361,7 +2376,7 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   //
   // 判官坏了 (抛错) → fail-open 按 oracle 念: 判卷官故障不许改终态 (与 tapVerifier 那条
   // 「verifier-error 不触发回灌」同向)。
-  let recheck: 'pass' | 'fail' | 'error' | 'skipped' = 'skipped';
+  let recheck: 'pass' | 'unproven' | 'fail' | 'error' | 'skipped' = 'skipped';
   const recheckOracleWouldPass = runnable ? oracleOk : false;
   if (reinjected && recheckOracleWouldPass && config.dag.verifier && reinjectedPlan && reinjectFinding !== undefined) {
     try {
@@ -2371,13 +2386,19 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
         plan: reinjectedPlan,
         results: exec.results,
       });
-      recheck = verdict.pass ? 'pass' : 'fail';
+      // 三格从二值裁决 + 一个固定前缀读出来 (2026-09-04): 判官拿不出反证时按卷面要求以
+      // `UNPROVEN:` 起头, 那是**放行但什么都没量到**, 与干净 pass 分开记账。
+      // trimStart: 判官偶尔在前缀前留空白, 那不该把这一格降级成 'pass' (读数会虚高)。
+      const unproven = verdict.pass && verdict.reason.trimStart().startsWith(RECHECK_UNPROVEN_PREFIX);
+      recheck = verdict.pass ? (unproven ? 'unproven' : 'pass') : 'fail';
       recheckReason = verdict.reason;
       logger.warn(
         { recheck, chars: verdict.reason.length },
         recheck === 'pass'
           ? '[run-goal] D-14 窄复审: 首判 finding 已修 → 放行'
-          : '[run-goal] D-14 窄复审: 首判 finding 仍未修 → verifier-rejected (机械 oracle 绿不算数)',
+          : recheck === 'unproven'
+            ? '[run-goal] D-14 窄复审: 拿不出反证也确认不了 → 放行但记 unproven (这次什么都没量到)'
+            : '[run-goal] D-14 窄复审: 拿到反证判首判 finding 仍未修 → verifier-rejected (机械 oracle 绿不算数)',
       );
     } catch (err) {
       // fail-open 吞异常**不吞证据** (§静默坑 2): 错误原文进日志, 'error' 与 'skipped' 分两格记账。
@@ -2490,7 +2511,10 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   /** INV-5 终态字面: 默认逐字等于 outcome, "rubric 没接线" / "判据没给出判词" 各自独立成词。 */
   const terminalLabel = criterionInconclusiveTerminal
     ? TERMINAL_CRITERION_INCONCLUSIVE
-    : rubricUnwiredTerminal ? TERMINAL_RUBRIC_UNWIRED : outcome;
+    : rubricUnwiredTerminal ? TERMINAL_RUBRIC_UNWIRED
+    // 1-B 否决判据 (2026-09-04): 排在上面两格之后 —— 那两格问的是「判据有没有给出判词」,
+    // 这一格问的是「给了判词但判词本身被终审否决」, 前两格成立时它们的归因更靠前。
+    : criterionVeto ? TERMINAL_CRITERION_VETOED : outcome;
   stages.push({
     stage: 'execute',
     // ⚠ `status` 保持原样 (三态一字未动, 全仓 `=== 'done'` 的消费者行为不变) ——

@@ -82,6 +82,13 @@ export const REINJECT_ANCHOR_HEAD = '[verifier 打回 · 回灌 1 次 (D-14: 回
 export const RECHECK_TASK_HEAD = '[D-14 窄复审 · 第二跑 · 只判首判 finding 修没修]';
 
 /**
+ * 「放行但没能确认」的固定前缀 (2026-09-04)。判官拿不出反证时按此起头写 reason,
+ * run-goal 据此把读数记成 `'unproven'` —— 与干净 pass 分两格记账, 终态同样放行。
+ * 常量而非散文正则: 卷面与解析共用这一个字面, 改一处两处跟着变。
+ */
+export const RECHECK_UNPROVEN_PREFIX = 'UNPROVEN:';
+
+/**
  * D-14 窄复审的卷面 (2026-09-04, owner 裁「补第二跑的复审」)。
  *
  * ## 为什么需要它
@@ -98,7 +105,26 @@ export const RECHECK_TASK_HEAD = '[D-14 窄复审 · 第二跑 · 只判首判 f
  *
  * ## 保守方向
  *
- * 「拿不准 → 判 fail」与 VER-1 同向:这一跑的默认答案是"没证明修好",不是"看起来还行"。
+ * ## 找反证,不找正证(2026-09-04 回流,code80-p5 读数)
+ *
+ * 初版写的是「拿不准 → 判 fail」(与 VER-1 同向)。实测 8 条 fail 里 **3 条 reward ≥ 0.6**,
+ * 最扎的一条 bench 测试 **4/4 全过**而复审判「四条要修项没有一条能被证据确认已修」——
+ * 纯粹是"看不到",不是"看到了没修"。
+ *
+ * 根因不是判官太严,是**卷面把职责摆反了**:窄复审跑在**机械 oracle 已经绿之后**,
+ * 这一格已经有一条独立证据在场。要求它正面证明"修好了"、否则否决,等于让 oracle 那条证据不算数
+ * —— VER-1 的「拿不准判 fail」适用于第一次全量终审(那时没有任何东西证明活干成了),
+ * 不适用于这里。
+ *
+ * 现行职责:**oracle 绿是 prior,复审要推翻它得拿出反证。**
+ *  · 能指出具体反证(引擎记录显示没落盘 / 改了但机制是错的 / 只修一半且能点名哪半)→ `fail`,否决。
+ *  · 拿不出反证,只是"看不到证据支持"→ `pass`,但 reason 必须以 `UNPROVEN:` 起头。
+ *    run-goal 据此把读数记成 `'unproven'` 而不是 `'pass'`——**终态按放行走,读数分得开**。
+ *    这样不动 `VerifierVerdict` 的 pass/fail 冻结二值面,也不把两种放行并成一格(§静默坑 1)。
+ *
+ * ⚠ 校准锚: code80-p5 里 5 条 reward ≤ 0.25 的真阳性,判词全是**反证**型
+ * (「第二跑连一行编辑都没落盘, git diff --stat 为证」「只修一半且被修的那半机制是错的」),
+ * 改成反证要求之后它们仍然红 —— 这是本次改动**不该**动到的那一半。
  */
 export function renderRecheckTask(originalTask: string, firstFinding: string): string {
   return [
@@ -111,9 +137,15 @@ export function renderRecheckTask(originalTask: string, firstFinding: string): s
     '- The question is a yes/no about the finding below. Do NOT open new lines of attack.',
     '- New problems you notice that are unrelated to the finding: mention them in `reason`, but they',
     '  do NOT make this pass fail. They are for the owner to read, not for you to veto on.',
-    '- A mechanical oracle already passed on this tree. That is not evidence the finding is fixed —',
-    '  tests and implementation written in the same change fail together and vouch for each other.',
-    '- If you cannot show from the evidence that the finding is addressed, answer fail. Uncertain = fail.',
+    '- A mechanical oracle already passed on this tree. Treat that as the prior. It is weak evidence',
+    '  (tests and implementation written in the same change fail together and vouch for each other),',
+    '  but it IS evidence. Your job is to OVERTURN it, which takes counter-evidence — not to re-prove it.',
+    '- Answer fail ONLY if you can point at concrete counter-evidence: engine records showing nothing',
+    '  was written, a change that is there but whose mechanism is wrong, a fix that covers one half of',
+    '  the finding and demonstrably not the other. Name it in `reason`.',
+    '- If you simply cannot see evidence either way, that is NOT a fail. Answer pass and start `reason`',
+    '  with the exact token `UNPROVEN:` followed by what you were unable to confirm. It is recorded',
+    '  separately from a clean pass, and the owner reads it.',
     '',
     '--- first verdict (the finding under review) ---',
     firstFinding,

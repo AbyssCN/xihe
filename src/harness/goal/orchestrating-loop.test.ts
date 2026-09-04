@@ -29,7 +29,7 @@ import { briefHasRepro, createConductorCardLedger } from './loop-ledger';
 import { CONDUCTOR_PROMPT_RESIDENT_MAX } from '../conductor/conductor-prompt';
 import type { ConductorCtx } from '../conductor/types';
 import type { GoalClassification } from './classify-acceptance';
-import { runGoal, type RunGoalConfig } from './run-goal';
+import { runGoal, TERMINAL_CRITERION_VETOED, type RunGoalConfig } from './run-goal';
 import {
   CONDUCTOR_HAND_TOOLS,
   CONDUCTOR_NODE_ID,
@@ -38,6 +38,7 @@ import {
   ORCHESTRATING_LOOP_PLAN_NAME,
   REINJECT_ANCHOR_HEAD,
   RECHECK_TASK_HEAD,
+  RECHECK_UNPROVEN_PREFIX,
   buildConductorFace,
   compileOrchestratingLoop,
   createConductorRuntimeTools,
@@ -337,7 +338,7 @@ describe('D-14 — 全量终审 1 次 + 回灌 1 次 + 窄复审 1 次 (INV-7 �
     expect(r.stages.find((s) => s.stage === 'execute')!.summary).toContain('finding 回灌 1 次');
   });
 
-  test('★ 窄复审的卷面是**窄**的: 首行是 RECHECK_TASK_HEAD, 带首判 finding 原文 + 原任务, 并明写「拿不准判 fail」', async () => {
+  test('★ 窄复审的卷面是**窄**的: 首行是 RECHECK_TASK_HEAD, 带首判 finding 原文 + 原任务, 并明写不许开新战线', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'omd-recheck-paper-'));
     const vcalls: { n: number; recheckTask?: string } = { n: 0 };
     await runGoal('修 add()', {
@@ -348,9 +349,10 @@ describe('D-14 — 全量终审 1 次 + 回灌 1 次 + 窄复审 1 次 (INV-7 �
     expect(paper.startsWith(RECHECK_TASK_HEAD)).toBe(true);
     expect(paper).toContain('edge case for empty input not covered'); // 首判 finding 原文
     expect(paper).toContain('修 add()'); // 原任务作为上下文
-    // 证伪: 把 renderRecheckTask 的这两条纪律删掉 → 复审会开新战线 / 拿不准放行, 这两条红。
+    // 证伪: 把 renderRecheckTask 的这条纪律删掉 → 复审会开新战线, 这条红。
     expect(paper).toContain('Do NOT open new lines of attack');
-    expect(paper).toContain('Uncertain = fail');
+    // 「拿不准判 fail」那句已于 2026-09-04 撤下 (code80-p5 实测它是 3/8 假阳性的根因),
+    // 反证要求与 UNPROVEN 出口的断言搬到下面那条专门的卷面用例。
   });
 
   test('★ 回灌后 oracle 绿但窄复审判「仍没修」→ verifier-rejected (机械 oracle 绿不算数)', async () => {
@@ -368,6 +370,55 @@ describe('D-14 — 全量终审 1 次 + 回灌 1 次 + 窄复审 1 次 (INV-7 �
     expect(vcalls.n).toBe(2);
     expect(r.terminalLabel).toBe('verifier-rejected'); // 终态词不新开一格 (成因写在 summary 里)
     expect(r.stages.find((st) => st.stage === 'execute')!.summary).toContain('窄复审判首判 finding 仍没修');
+  });
+
+  test('★ 拿不出反证 (reason 以 UNPROVEN: 起头) → 放行 success, 但读数记 unproven 而不是 pass', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'omd-recheck-unproven-'));
+    const r = await runGoal('修 add()', {
+      ...baseCfg(cwd, { _classify: classify({ n: 0 }, EXEC_ACCEPT), _runDag: fakeEngine([]) }),
+      dag: {
+        conductorModel: 'c:m', leafModel: 'l:m',
+        verifier: async (req: { task: string }) =>
+          req.task.startsWith(RECHECK_TASK_HEAD)
+            ? { pass: true, reason: 'UNPROVEN: 四条要修项里没有一条能从卷面证据确认, 也拿不出反证', usage: { in: 1, out: 1 } }
+            : { pass: false, reason: 'edge case for empty input not covered', usage: { in: 1, out: 1 } },
+      } as ExecutorDagConfig,
+    });
+    // code80-p5 的 3/8 假阳性正是这一型 (最扎的一条 bench 测试 4/4 全过却被判 fail): oracle 绿是
+    // prior, 拿不出反证就不该推翻它。证伪: 去掉 run-goal 里 unproven 的判定 → recheck 变 'pass', 下面第二条红。
+    expect(r.outcome).toBe('success');
+    expect(r.loop!.verifier.recheck).toBe('unproven');
+    expect(r.recheckDissent).toContain('UNPROVEN:');
+  });
+
+  test('UNPROVEN 前缀前有空白仍算 unproven (否则这一格会被降级成 pass, 读数虚高)', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'omd-recheck-unproven-ws-'));
+    const r = await runGoal('修 add()', {
+      ...baseCfg(cwd, { _classify: classify({ n: 0 }, EXEC_ACCEPT), _runDag: fakeEngine([]) }),
+      dag: {
+        conductorModel: 'c:m', leafModel: 'l:m',
+        verifier: async (req: { task: string }) =>
+          req.task.startsWith(RECHECK_TASK_HEAD)
+            ? { pass: true, reason: '\n  UNPROVEN: 看不出来', usage: { in: 1, out: 1 } }
+            : { pass: false, reason: 'edge case for empty input not covered', usage: { in: 1, out: 1 } },
+      } as ExecutorDagConfig,
+    });
+    // 证伪: 把 trimStart() 去掉 → 变 'pass', 这条红。
+    expect(r.loop!.verifier.recheck).toBe('unproven');
+  });
+
+  test('窄复审卷面要反证不要正证: 明写 counter-evidence / UNPROVEN 出口, 不再有 Uncertain = fail', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'omd-recheck-paper2-'));
+    const vcalls: { n: number; recheckTask?: string } = { n: 0 };
+    await runGoal('修 add()', {
+      ...baseCfg(cwd, { _classify: classify({ n: 0 }, EXEC_ACCEPT), _runDag: fakeEngine([]) }),
+      dag: { conductorModel: 'c:m', leafModel: 'l:m', verifier: failThenPass(vcalls) } as ExecutorDagConfig,
+    });
+    const paper = vcalls.recheckTask!;
+    expect(paper).toContain('concrete counter-evidence');
+    expect(paper).toContain(RECHECK_UNPROVEN_PREFIX);
+    // 证伪 (回归钉): 初版那句把「看不到」与「看到没修」并成 fail, 是 3/8 假阳性的根因, 不许回来。
+    expect(paper).not.toContain('Uncertain = fail');
   });
 
   test('窄复审调不通 (判卷官抛错) → fail-open 按 oracle 念 success, recheck 记 error (与 skipped 分开)', async () => {
@@ -545,6 +596,12 @@ describe('1-B (2026-09-03): 终审否决判据 (target=criterion) → 不回灌 
     expect(r.criterionRebuild!.admitted).toBe(false);
     expect(r.criterionRebuild!.trigger).toContain('target=criterion');
     expect(r.stages.some((s) => s.summary.includes('1-B'))).toBe(true);
+    // 2026-09-04 (code80-p5 读数): 「判据坏」与「实装没修好」共用 verifier-rejected 这个字面, 把
+    // 3 题 bench 测试 12/12 · 12/12 · 13/13 全过的活念成了失败 —— 两格的下一步相反 (判据重建 vs
+    // 重跑实装)。outcome 仍不新开一格 (被否决的判据上 oracle 绿仍不算交付证据), 只有字面分开。
+    // 证伪: 把 terminalLabel 里的 `criterionVeto ?` 那一支去掉 → 退回 'verifier-rejected', 这条红。
+    expect(r.terminalLabel).toBe(TERMINAL_CRITERION_VETOED);
+    expect(r.outcome).toBe('verifier-rejected');
   });
 });
 
