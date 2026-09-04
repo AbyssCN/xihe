@@ -37,8 +37,8 @@
  *   主树上没提交的东西在那边看不见。这是隔离的定义, 但用的人容易惊讶, 所以写在这里。
  */
 import type { Dirent } from 'node:fs';
-import { existsSync, readdirSync, symlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, symlinkSync, mkdirSync, readlinkSync} from 'node:fs';
+import { join, isAbsolute} from 'node:path';
 import { logger } from './logger';
 import { captureRollbackAnchor, type RollbackAnchor } from './writeset/rollback-anchor';
 import { isDeliveredOutcome } from './run-outcome';
@@ -219,11 +219,73 @@ export function ensureNodeModulesLink(
   if (!existsSync(source)) return 'no-source';
   if (existsSync(dest)) return 'already-present';
   try {
-    link(source, dest);
+    mirrorNodeModules(source, dest, link);
     return 'linked';
   } catch (e) {
     return `link-failed: ${(e as Error).message.slice(0, 200)}`;
   }
+}
+
+/**
+ * 逐条镜像一份 node_modules(#205-ter, 2026-09-04 plana 实账 · 第四个 bug)。
+ *
+ * ## 为什么不能整目录 symlink
+ *
+ * `<wt>/node_modules` 若是指向主树那份的整目录软链, 则
+ * `<wt>/node_modules/@plana/domain` → 主树的 `@plana/domain` → `../../packages/domain`
+ * (相对**主树**) → `/主repo/packages/domain` —— **jail 里按设计不可见**(反 oracle 作弊那条),
+ * tsc 报 `Cannot find module '@plana/domain'`。
+ * **workspace 内部包的解析经过的是指向主树源码的软链, 而主树源码正是 jail 要藏起来的东西。**
+ * 叶子跑 `npm install` 自救是**对的** —— 那次 install 正是把这些链改写成指向 worktree。
+ *
+ * ## 办法: 相对目标**逐字照抄**, 它自己会重定基
+ *
+ * · 条目是软链且目标是**相对**路径 → 照抄目标串。`../../packages/domain` 在新位置自然解析到
+ *   `<wt>/packages/domain` —— workspace 内部包**自动**指回本树, 不需要认识"哪些是内部包"。
+ * · 条目是软链且目标是绝对路径 → 照抄(它指的是真身, 与在哪棵树无关)。
+ * · 条目是真目录/文件 → 软链到**主树的绝对路径**(真依赖的真身在那儿; 主树 node_modules
+ *   由 `collectNodeModules` 一并绑进 jail)。
+ *
+ * scope 目录(`@…`)只在**含相对软链时**才下钻一层 —— 实测 plana 主树 733 个顶层条目里
+ * 相对软链**零条**, 只有 `@plana` 一个 scope 目录里有 6 条。不含就整目录照链, 省掉几千次 IO。
+ *
+ * 实测成本: 733 条软链 0,86 秒。
+ */
+function mirrorNodeModules(source: string, dest: string, link: (target: string, path: string) => void): void {
+  // 刻意**不** recursive: 父目录缺席(子包未进 checkout)要保持原来的 link-failed 记账,
+  // 而不是凭空造一个没人会 import 的空 node_modules —— 那会把"这个子包不在树里"这条信息吞掉。
+  mkdirSync(dest);
+  for (const e of readdirSync(source, { withFileTypes: true, encoding: 'utf8' })) {
+    const src = join(source, e.name);
+    const dst = join(dest, e.name);
+    if (e.isSymbolicLink()) {
+      link(readlinkSync(src), dst); // 相对目标照抄 = 自动重定基; 绝对目标原样有效
+      continue;
+    }
+    if (e.isDirectory() && e.name.startsWith('@') && scopeHasRelativeLink(src).hasRelative) {
+      mirrorNodeModules(src, dst, link); // 只有这一层需要下钻
+      continue;
+    }
+    link(src, dst);
+  }
+}
+
+/**
+ * scope 目录里有没有**相对**软链 —— 有才值得下钻(见 {@link mirrorNodeModules})。
+ * 读不动时 `err` 经返回值交出去且判 true(宁可多做一层, 也好过把 workspace 链漏成指向主树)。
+ */
+function scopeHasRelativeLink(scopeDir: string): { hasRelative: boolean; err?: string } {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(scopeDir, { withFileTypes: true, encoding: 'utf8' });
+  } catch (e) {
+    return { hasRelative: true, err: (e as Error).message };
+  }
+  for (const e of entries) {
+    if (!e.isSymbolicLink()) continue;
+    if (!isAbsolute(readlinkSync(join(scopeDir, e.name)))) return { hasRelative: true };
+  }
+  return { hasRelative: false };
 }
 
 /**

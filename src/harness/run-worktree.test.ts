@@ -300,7 +300,9 @@ describe('ensureNodeModulesLink (#166: worktree 缺 node_modules → 显式路�
     expect(r).toBe('linked');
     // run 5fd13a78 的失败面就是这一格: 显式 join 路径读包文件。
     expect(exists(join(wt, 'node_modules', 'somepkg', 'index.js'))).toBe(true);
-    expect(realpathSync(join(wt, 'node_modules'))).toBe(realpathSync(join(main, 'node_modules')));
+    // #205-ter 后 <wt>/node_modules 是**逐条镜像的真目录**(理由见 mirrorNodeModules 的注),
+    // 所以这里钉的不再是"整目录是同一个 inode", 而是原意: **包的真身仍在主树那份里**。
+    expect(realpathSync(join(wt, 'node_modules', 'somepkg'))).toBe(realpathSync(join(main, 'node_modules', 'somepkg')));
   });
 
   test('主树没有 node_modules → no-source (不编一个空目录出来)', () => {
@@ -339,8 +341,14 @@ describe('ensureNodeModulesLink (#166: worktree 缺 node_modules → 显式路�
 
 // ── #174 一级子包 node_modules 链入 ──────────────────────────────────────────────
 describe('ensureNodeModulesLinks (#174: web/ 等一级子包自己的 node_modules, #166 只链了仓根)', () => {
-  const { mkdtempSync: mkTmp, mkdirSync: mkDir, existsSync: exists, writeFileSync: writeF } =
-    require('node:fs') as typeof import('node:fs');
+  const {
+    mkdtempSync: mkTmp,
+    mkdirSync: mkDir,
+    existsSync: exists,
+    writeFileSync: writeF,
+    readFileSync: readF,
+    symlinkSync,
+  } = require('node:fs') as typeof import('node:fs');
   const { tmpdir: osTmp } = require('node:os') as typeof import('node:os');
 
   const monorepo = () => {
@@ -412,6 +420,44 @@ describe('ensureNodeModulesLinks (#174: web/ 等一级子包自己的 node_modul
     // 真正的失败面就是这一格: apps/web/src/** 解析被提升进子包的依赖
     expect(exists(join(wt, 'apps', 'web', 'node_modules', '@hookform'))).toBe(true);
     expect(exists(join(wt, 'apps', 'docs', 'node_modules'))).toBe(false);
+  });
+
+  /**
+   * #205-ter (2026-09-04, plana 实账 · 第四个 bug): **workspace 内部包的解析经过指向主树源码的软链,
+   * 而主树源码正是 jail 要藏起来的东西。**
+   *
+   * 此前 `<wt>/node_modules` 是指向主树那份的**整目录**软链, 于是
+   * `<wt>/node_modules/@plana/domain` → 主树的 `@plana/domain` → `../../packages/domain`
+   * (相对**主树**) → `/主repo/packages/domain` —— jail 里按设计不可见, tsc 报
+   * `Cannot find module '@plana/domain'`。叶子跑 `npm install` 自救是**对的**:
+   * 那次 install 正是把这些链改写成指向 worktree。我们来做, 做得干净且幂等。
+   *
+   * 实测形态 (plana 主树): 顶层 733 个条目**零条**相对软链, 只有 `@plana` 这一个 scope 目录里有
+   * 6 条 —— 所以逐条镜像时**相对目标逐字照抄**就够: 它自己会重定基到 worktree。
+   *
+   * 证伪方式: 把 mirrorNodeModules 换回整目录 symlink → 本条红。
+   */
+  test('workspace 内部包重定基到 worktree, 不再指向主树源码', () => {
+    const root = mkTmp(join(osTmp(), 'omd-ws-redirect-'));
+    const main = join(root, 'main');
+    const wt = join(root, 'wt');
+    // 主树: node_modules 里一个真依赖 + 一个指向自家 packages 的相对软链 (workspace 内部包)
+    mkDir(join(main, 'node_modules', 'lodash'), { recursive: true });
+    writeF(join(main, 'node_modules', 'lodash', 'index.js'), 'real-dep');
+    mkDir(join(main, 'node_modules', '@plana'), { recursive: true });
+    mkDir(join(main, 'packages', 'domain'), { recursive: true });
+    writeF(join(main, 'packages', 'domain', 'index.ts'), 'MAIN');
+    symlinkSync('../../packages/domain', join(main, 'node_modules', '@plana', 'domain'), 'dir');
+    // worktree: 自己的 packages/domain(内容不同 —— 用来分辨解析到了哪一棵树)
+    mkDir(join(wt, 'packages', 'domain'), { recursive: true });
+    writeF(join(wt, 'packages', 'domain', 'index.ts'), 'WORKTREE');
+
+    ensureNodeModulesLinks(main, wt);
+
+    // ★ 这一格就是第四个 bug 的失败面
+    expect(readF(join(wt, 'node_modules', '@plana', 'domain', 'index.ts'), 'utf8')).toBe('WORKTREE');
+    // 真依赖仍要够得到 (指向主树是对的 —— 那才是它的真身)
+    expect(readF(join(wt, 'node_modules', 'lodash', 'index.js'), 'utf8')).toBe('real-dep');
   });
 
   test('幂等: 第二遍全 already-present (resume 复用路每次都来一遍)', () => {

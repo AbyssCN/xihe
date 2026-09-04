@@ -22,9 +22,10 @@
  *
  * ## 边界:这里只管"给不给得到",不管"够不够用"
  *
- * ⚠ **Playwright 的浏览器**绑进来之后仍可能跑不动:bwrap 的 `--dev /dev` 给的是最小 /dev,
- * **没有 /dev/shm**,Chromium 缺它会崩。要真跑浏览器还需要 `--disable-dev-shm-usage`
- * 或额外挂一份 shm —— 那是调用方/仓自己的事,本模块不替它决定。**没测过就不说测过。**
+ * ⚠ **Playwright 已实测能跑**(2026-09-04,plana 的 `npm run test:design` 五套 Playwright 在真 bwrap
+ * jail 里 `ALL SUITES PASSED`)。此前担心 bwrap 的 `--dev /dev` 没有 `/dev/shm` 会让 Chromium 崩 ——
+ * **实测没有成真**,不再当成待办。若换个仓真撞上,解法是仓侧的 `--disable-dev-shm-usage`,
+ * 不是本模块再多挂一层。
  *
  * @module
  */
@@ -48,7 +49,7 @@ export interface EcosystemSpec {
  *
  * ⚠ 分两档,别混:
  * · 本机**实测过**的:`node`(plana 那四个 run 的现场)。
- * · **只是表项、尚未在真仓上跑过**的:其余全部。它们的 `homePaths` 是各生态的公认默认位置,
+ * · **只是表项、尚未在真仓上跑过**的:`pnpm` / `python` / `rust` / `go` / `jvm` / `ruby`。它们的 `homePaths` 是各生态的公认默认位置,
  *   但"绑了就一定能跑"没有被证过 —— 第一个用到的人会是第一个证它的人。这一格刻意写明,
  *   因为「没测」与「测过且通过」必须分得开(本仓第五次为同一条纪律付账)。
  */

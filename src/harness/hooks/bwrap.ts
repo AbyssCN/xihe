@@ -50,6 +50,15 @@ function tryRealpath(p: string): { path: string; err?: undefined } | { path?: un
   }
 }
 
+/** readdir,**把失败原因经返回值交出去**(同 {@link tryRealpath} 的理由)。 */
+function tryReaddir(dir: string): { entries: Dirent[]; err?: undefined } | { entries?: undefined; err: string } {
+  try {
+    return { entries: readdirSync(dir, { withFileTypes: true, encoding: 'utf8' }) };
+  } catch (e) {
+    return { err: (e as Error).message };
+  }
+}
+
 /** 自 start 向上找最近含 node_modules 的祖先目录, 返 node_modules **真身**绝对路径 (无则 null)。
  * ⚠ realpath 是承重的 (#166 后, run 68cfb43f 实测): 隔离 worktree 的 node_modules 是指向
  * 主树的 symlink —— ro-bind 链接路径本身, jail 里链接的**目标**不可见 → typebox 悬空 ENOENT,
@@ -90,15 +99,15 @@ export function collectNodeModules(root: string, maxDepth = 4): string[] {
   const out = new Set<string>();
   const ancestor = findNodeModules(root);
   if (ancestor) out.add(ancestor);
+  // (#205-ter) worktree 的 node_modules 现在是**逐条镜像的真目录**, 条目软链到主树那份里的包
+  // (见 run-worktree 的 mirrorNodeModules) —— 主树那份不绑, 每个真依赖在 jail 里都悬空。
+  // ⚠ 刻意**不**靠"worktree 在主仓之内"去向上找: 那正是本轮一路在修的那种布局假设。
+  // 改成从镜像**自己的指向**推 —— 条目指到哪个 node_modules, 就绑哪个。
   const walk = (dir: string, depth: number): void => {
     if (depth > maxDepth) return;
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true, encoding: 'utf8' });
-    } catch {
-      return; // 权限/竞态: 收不到就算了, 少绑一份好过整个组装崩掉
-    }
-    for (const e of entries) {
+    const r = tryReaddir(dir);
+    if (!r.entries) return; // r.err = 权限/竞态; 少绑一份好过整个组装崩掉
+    for (const e of r.entries) {
       // symlink 也要认: worktree 的 node_modules 常常是指向主树的链接 (86e6cdb 同款)
       if (!e.isDirectory() && !e.isSymbolicLink()) continue;
       if (NM_SKIP_DIRS.has(e.name)) continue;
@@ -112,6 +121,27 @@ export function collectNodeModules(root: string, maxDepth = 4): string[] {
     }
   };
   walk(resolve(root), 0);
+  for (const nm of [...out]) for (const t of mirrorTargets(nm)) out.add(t);
+  return [...out];
+}
+
+/**
+ * 一份逐条镜像的 node_modules 指向了**别的哪些** node_modules(见 {@link collectNodeModules} 的 ⚠)。
+ *
+ * 只认「绝对目标 且 其父目录就叫 node_modules」这一种形态 —— 那正是 mirrorNodeModules 为真依赖
+ * 建的链。相对目标是 workspace 内部包, 它们按设计解析回本树, 不需要额外绑。
+ */
+function mirrorTargets(nm: string): string[] {
+  const out = new Set<string>();
+  const r = tryReaddir(nm);
+  if (!r.entries) return []; // r.err = 读不动; 它自己已在绑定表里, 少一层间接目标好过组装崩掉
+  for (const e of r.entries) {
+    if (!e.isSymbolicLink()) continue;
+    const r = tryRealpath(join(nm, e.name));
+    if (!r.path) continue; // r.err = 悬空链接
+    const parent = dirname(r.path);
+    if (basename(parent) === 'node_modules' && parent !== nm) out.add(parent);
+  }
   return [...out];
 }
 
