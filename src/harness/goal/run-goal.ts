@@ -2609,6 +2609,9 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
         ...(conductorInfraFailure !== undefined ? { conductorInfraFailure } : {}),
         // #205: 冻结点写进卡账本, 这里提到顶层 (与 criterionFreeze 同款分层)。缺席 = 没跑这道探针。
         ...(loopLedger.criterionDirection !== undefined ? { criterionDirection: loopLedger.criterionDirection } : {}),
+        // #205 ①: 判据自证裁决进 **loop** 而不是结果顶层 —— 只有 loop 整份 JSON 出得了 bench 容器
+        // (code80-p6 实测: 挂顶层时 68 题全缺席)。顶层那份保留, 给非 bench 调用方读。
+        ...(classified.acceptanceProbe ? { acceptanceProbe: classified.acceptanceProbe } : {}),
         // #205 第三刀: 执行体改了几个仓库自带的测试文件 (环外信号, 只记账不拦)。
         // `git cat-file -e HEAD:<path>` 判「改动前存在」; 非 git 仓 / git 调不通 → null, 不是 0。
         existingTestsTouched: countExistingTestsTouched(

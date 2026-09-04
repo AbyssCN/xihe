@@ -17,6 +17,8 @@ import type { JudgingTruths } from '../verifier';
 
 export type ConductorCardName = 'work' | 'spawn' | 'map' | 'explore' | 'best_of' | 'research' | 'decompose';
 
+import type { AcceptanceProbe } from './acceptance-gate';
+
 export interface LoopDispatch {
   seq: number;
   card: ConductorCardName;
@@ -202,6 +204,14 @@ export interface LoopLedger {
    * ⚠ `null` = 算不出来 (仓不是 git / git 调不通), 与 `0` (真的一条没改) **分开** (§静默坑 1)。
    */
   existingTestsTouched?: number | null;
+  /**
+   * 分类期判据自证的裁决 (#205 ①)。**挂在这里而不是 RunGoalResult 顶层**:
+   * `resultOut` 只序列化 `r.loop` 整份 JSON (`mcp/tools/goal.ts` 的 `loop:` 头行),
+   * 顶层字段出不了 bench 容器 —— code80-p6 实测挂顶层时 68 题全缺席, 而同批挂在本类型上的
+   * `criterionDirection` / `existingTestsTouched` 都读到了。**读不到的读数等于没有这个读数。**
+   * (账本 `dag-runs.db` 那条路更早就不通: 库在 omd home, `omd-state.tgz` 只扫 `<cwd>/.omd`。)
+   */
+  acceptanceProbe?: AcceptanceProbe;
 
   cards: Omit<ConductorCardLedger, 'dispatches' | 'residentPromptChars' | 'criterionFreeze' | 'criterionDirection'>;
   dispatches: LoopDispatch[];

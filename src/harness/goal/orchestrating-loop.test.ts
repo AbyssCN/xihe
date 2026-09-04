@@ -584,6 +584,10 @@ describe('R-1 账本: runGoal 结果上的 loop', () => {
     // 证伪: 把 run-goal 里那条 acceptanceProbe spread 删掉 → 字段缺席, 下面两条红。
     expect(r.acceptanceProbe?.kind).toBe('unproven-missing');
     if (r.acceptanceProbe?.kind === 'unproven-missing') expect(r.acceptanceProbe.missing).toContain('tests/new.test.ts');
+    // ⚠ **出容器的那一份在 loop 上**: resultOut 只序列化 `r.loop` 整份 JSON, 顶层字段出不去 ——
+    // code80-p6 实测挂顶层时 68 题全缺席, 而同批的 criterionDirection (挂 loop) 读到了。
+    // 证伪: 去掉 run-goal 里 loop 那条 acceptanceProbe spread → 本条红 (顶层那条仍绿, 抓不到)。
+    expect(r.loop!.acceptanceProbe?.kind).toBe('unproven-missing');
   });
 
   test('没回灌 (verifier 过) ⇒ afterReinject skipped, firstVerdict pass; 注入式分类器无 llmCalls ⇒ null', async () => {
