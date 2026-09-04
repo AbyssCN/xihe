@@ -181,6 +181,11 @@ export async function runToolCallTurn(opts: ToolCallTurnOpts): Promise<ToolCallT
         message?: { content?: Array<{ type: string; text?: string; name?: string; input?: unknown; id?: string }> };
         usage?: { input_tokens?: number; output_tokens?: number };
       };
+      // usage 要在 abort **之前**尽量收: 截获 tool_use 就中止 → SDK 的 `result` 消息永远到不了,
+      // 只读 result 会让每一轮工具调用的记账都是 0 —— 而 0 与「真的没花 token」不可分 (§静默坑 1)。
+      // assistant 消息自带 usage, 从它收(实测桥回包 usage 全 0 暴露的正是这一格)。
+      const au = (m as { message?: { usage?: { input_tokens?: number; output_tokens?: number } } }).message?.usage;
+      if (au && (au.input_tokens || au.output_tokens)) usage = { in: au.input_tokens ?? 0, out: au.output_tokens ?? 0 };
       if (m.type === 'assistant' && Array.isArray(m.message?.content)) {
         for (const blk of m.message.content) {
           if (blk.type === 'text' && blk.text) text += blk.text;

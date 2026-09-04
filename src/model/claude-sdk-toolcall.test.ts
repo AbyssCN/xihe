@@ -95,7 +95,22 @@ describe('截获: tool_use → OpenAI tool_calls', () => {
     expect(r.toolCalls.map((c) => c.function.name)).toEqual(['work', 'explore']);
   });
 
-  test('usage 从 result 消息读出 (订阅通道的记账口径)', async () => {
+  test('★ usage 从 assistant 消息收 —— 截获后就 abort, result 消息永远到不了', async () => {
+    const r = await runToolCallTurn({
+      modelId: 'claude-opus-5',
+      messages: [{ role: 'user', content: 'go' }],
+      tools: TOOLS,
+      _query: fakeQuery([
+        { type: 'assistant', message: { usage: { input_tokens: 900, output_tokens: 12 }, content: [{ type: 'tool_use', id: 'a', name: `mcp__${TOOLCALL_MCP_SERVER}__work`, input: {} }] } } as unknown as SDKMessage,
+      ]),
+    });
+    // 实测桥回包 usage 全 0 暴露的正是这一格: 只读 result 时每轮工具调用的记账都是 0,
+    // 而 0 与「真的没花 token」不可分。证伪: 删掉 assistant.usage 那一跳 → 变 {0,0}, 本条红。
+    expect(r.usage).toEqual({ in: 900, out: 12 });
+    expect(r.toolCalls).toHaveLength(1);
+  });
+
+  test('usage 从 result 消息读出 (没有工具调用时的口径)', async () => {
     const r = await runToolCallTurn({
       modelId: 'claude-opus-5',
       messages: [{ role: 'user', content: 'go' }],
