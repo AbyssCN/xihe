@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { checkAuth, handleChatCompletions, parseBridgeMap, toSingleChunkSse } from './bench-bridge';
-import { normalizeForDeepseek } from './bench-bridge';
+import { isSubscriptionCoord, normalizeForDeepseek } from './bench-bridge';
 import type { ModelRequest, ModelResponse } from '../src/model/types';
 
 const fakeCall = (capture: ModelRequest[]) => async (req: ModelRequest): Promise<ModelResponse> => {
@@ -169,5 +169,22 @@ describe('deepseek 透传形状归一 (2026-09-03)', () => {
     type B = { model: string; stream?: boolean; stream_options?: unknown; store?: unknown; messages?: Array<Record<string, unknown>> };
     const withOpts: B = { model: 'x', stream: true, stream_options: { include_usage: true }, store: false };
     expect(normalizeForDeepseek(withOpts) as B).toEqual({ model: 'x', stream: true });
+  });
+});
+
+// ── 订阅座工具转发 (2026-09-04) ────────────────────────────────────────────────
+//
+// 来历: smoke8-oc 里 opus 经桥当 conductor **8/8 零派发** (`toolCalls:0 / tokensOut:44`),
+// 而同一个 opus 本地直连 6/10 success、工具调用 8–18 次 —— 缺口在 callModel 走的完成位通道
+// 「tools 全空」。这几条钉住路由判据与零回归。
+describe('订阅座工具转发路由', () => {
+  test('★ 判据是「带没带 tools」, 不是座位名 —— 不带 tools 的订阅座调用仍走既有 translate', () => {
+    expect(isSubscriptionCoord('claude-code:claude-opus-5')).toBe(true);
+    expect(isSubscriptionCoord('openai-codex:gpt-5.6-sol')).toBe(true);
+    // 透传座不该被误判进来 (它们本来就工具原生往返)。
+    // 证伪: 把 isSubscriptionCoord 改成恒 true → 下面两条红, minimax/deepseek 会被抢走。
+    expect(isSubscriptionCoord('minimax-cn:MiniMax-M3')).toBe(false);
+    expect(isSubscriptionCoord('deepseek:deepseek-v4-flash')).toBe(false);
+    expect(isSubscriptionCoord(undefined)).toBe(false);
   });
 });

@@ -20,6 +20,15 @@
  * pi 的 openai 客户端两种都吃, 真流式待实测需要再做)。
  */
 import type { ModelMessage, ModelRequest, ModelResponse } from '../src/model/types';
+import { runToolCallTurn, type OpenAiToolCall, type OpenAiToolDecl, type WireMessage } from '../src/model/claude-sdk-toolcall';
+
+/**
+ * 订阅 OAuth 座 (无 base URL + API key, 所以进不了字节级透传白名单)。
+ * 这两族是 translate 分支的全部住户, 也正是工具面此前蒸发的那两族。
+ */
+export function isSubscriptionCoord(coord: string | undefined): boolean {
+  return !!coord && (coord.startsWith('claude-code:') || coord.startsWith('openai-codex:'));
+}
 
 export interface BridgeDeps {
   call: (req: ModelRequest) => Promise<ModelResponse>;
@@ -39,12 +48,14 @@ export function parseBridgeMap(spec: string | undefined): Map<string, string> {
 
 interface OpenAiChatBody {
   model?: string;
-  messages?: Array<{ role: string; content: unknown }>;
+  messages?: Array<{ role: string; content: unknown; tool_call_id?: string; tool_calls?: OpenAiToolCall[] }>;
   temperature?: number;
   top_p?: number;
   max_tokens?: number;
   max_completion_tokens?: number;
   stream?: boolean;
+  /** 2026-09-04: 工具面。translate 分支此前整条丢弃它 —— 那正是 opus/gpt 坐不了 conductor 的原因。 */
+  tools?: OpenAiToolDecl[];
 }
 
 /**
@@ -111,6 +122,61 @@ export async function handlePassthrough(
     };
   }
   return { status: res.status, json };
+}
+
+/**
+ * 订阅座的**工具转发**分支 (2026-09-04)。
+ *
+ * 为什么单独一条: `callModel` 对 claude-code 走的是完成位通道 (`claude-sdk-complete`, 头注写明
+ * 「tools 全空、无 MCP」), 于是带 tools 的请求在 translate 里工具面整条蒸发 —— 实测 smoke8-oc
+ * opus 当 conductor **8/8 零派发** (`toolCalls:0 / tokensOut:44`), 而同一个 opus 本地直连
+ * 6/10 success、工具调用 8–18 次。这是通道缺口, 不是模型能力。
+ *
+ * 工具**不在这里执行**: handler 是桩, 截获 `tool_use` 就中止, 转成 OpenAI `tool_calls` 交回容器 ——
+ * 工具要操作容器的 /workspace, 桥在宿主, 在这边执行就是错的机器。
+ * 可行性由 `scripts/claude-sdk-toolcall-passthrough-probe.ts` 实测坐实 (handler 未被调用即截获)。
+ */
+export async function handleSubscriptionToolCall(
+  body: OpenAiChatBody,
+  coord: string,
+): Promise<{ status: number; json: unknown }> {
+  const modelId = coord.slice(coord.indexOf(':') + 1);
+  try {
+    const r = await runToolCallTurn({
+      modelId,
+      messages: (body.messages ?? []) as WireMessage[],
+      tools: body.tools ?? [],
+      ...(body.max_tokens ?? body.max_completion_tokens ? { maxTokens: (body.max_tokens ?? body.max_completion_tokens)! } : {}),
+      ...(body.temperature !== undefined ? { temperature: body.temperature } : {}),
+      ...(body.top_p !== undefined ? { topP: body.top_p } : {}),
+    });
+    return {
+      status: 200,
+      json: {
+        id: `chatcmpl-bridge-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: body.model,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: r.text || null,
+              ...(r.toolCalls.length ? { tool_calls: r.toolCalls } : {}),
+            },
+            finish_reason: r.finishReason,
+          },
+        ],
+        usage: { prompt_tokens: r.usage.in, completion_tokens: r.usage.out, total_tokens: r.usage.in + r.usage.out },
+      },
+    };
+  } catch (e) {
+    // 吞异常不许吞证据: 原文透传, 502 让客户端知道是桥后侧挂了 (同 translate 分支的纪律)。
+    const msg = (e as Error).message;
+    process.stderr.write(`[bench-bridge] 订阅座工具转发失败 (${coord}): ${msg}\n`);
+    return { status: 502, json: { error: { message: `subscription tool-call channel: ${msg}` } } };
+  }
 }
 
 /** 纯处理器: OpenAI body → callModel → OpenAI 响应体 (或错误 {status,error})。 */
@@ -366,7 +432,12 @@ if (import.meta.main) {
                 apiKey: deepseekKey,
                 modelId: coordForRoute.slice('deepseek:'.length),
               })
-            : await handleChatCompletions(body, deps);
+            // 订阅座 (claude-code / openai-codex) 带 tools → 工具转发位。
+            // 判据是「带没带 tools」而不是座位名: 不带 tools 的调用 (verifier 单发判词) 走
+            // 既有 translate 一个字节不变, 零回归。
+            : isSubscriptionCoord(coordForRoute) && (body.tools?.length ?? 0) > 0
+              ? await handleSubscriptionToolCall(body, coordForRoute!)
+              : await handleChatCompletions(body, deps);
         // 调试观测位 (env 开): 每笔请求/响应原文写入磁盘 —— 桥是唯一能看见"容器侧模型到底
         // 说了什么"的位置 (任务容器随 trial 回收, 容器内 .omd 现场拿不回来)。
         const logDir = process.env.OMD_BRIDGE_LOG_DIR?.trim();
