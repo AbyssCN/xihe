@@ -99,6 +99,7 @@ import {
   checkCriterionFreeze,
   renderCriterionFreezeTruth,
 } from './orchestrating-loop';
+import type { AcceptanceProbe } from './acceptance-gate';
 import { countExistingTestsTouched, createConductorCardLedger, withDispatchEvidence, type ConductorCardLedger, type LoopLedger } from './loop-ledger';
 import { conductorCtxOf, withLoopConfig, type LoopHost } from './loop-run';
 
@@ -498,6 +499,15 @@ export interface RunGoalResult {
    * (不值得再花一次调用) / 判卷官调不通 (fail-open)。**别把三者读成同一件事** (§静默坑 1)。
    */
   recheckDissent?: string;
+  /**
+   * 分类期判据自证的裁决 (#205, 2026-09-04 透出到结果面)。
+   *
+   * 为什么必须在**这里**而不是只进账本: 它原本只写 `dag-runs.db` 的 `acceptance_probe` 列,
+   * 而 bench 容器里那个库**不出容器** (R-1 第 4 步注已记同一条: 账本在 omd home, `omd-state.tgz`
+   * 只扫 `<cwd>/.omd`)。于是 `unproven-missing` 这一格在 bench 上永远读不到 —— 一个读不到的
+   * 读数等于没有这个读数。挂到结果面上, 它随 resultOut 的 JSON 一起出容器。
+   */
+  acceptanceProbe?: AcceptanceProbe;
   /**
    * **判据重建边的留痕** (INV-4)。缺席 = 未触发重建。
    * `proposed` 缺席 = 触发了但重建者缺席/提不出 (与"提了没过门"分开: 后者 `proposed` 在场而 `admitted` 假)。
@@ -2671,6 +2681,8 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
     // 窄复审判词与首判判词**分两个字段**: 合并会让读的人分不清"哪条是第二只眼说的"。
     // pass 时也带 —— 那是「为什么算修好了」的唯一记录, 丢掉它 recheck:'pass' 就成了无据的一个字。
     ...(recheckReason !== undefined ? { recheckDissent: recheckReason } : {}),
+    // #205: 判据自证裁决随结果出容器 (见字段注 —— 账本那条路在 bench 上读不到)。
+    ...(classified.acceptanceProbe ? { acceptanceProbe: classified.acceptanceProbe } : {}),
     ...(criterionRebuild ? { criterionRebuild } : {}),
    };
   // D-2 散雾出口 (切片 1): 拿到 map 句柄才开票; 没配 = 这一行直接返回, 行为逐字节不变 (INV-1)。

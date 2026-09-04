@@ -568,6 +568,24 @@ describe('R-1 账本: runGoal 结果上的 loop', () => {
     expect(r.loop!.dispatchesBeforeReinject).toBe(0);
   });
 
+  test('★ #205: 分类器的 acceptanceProbe 随结果出容器 —— 账本那条路在 bench 里读不到', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'omd-probe-surface-'));
+    const r = await runGoal('修 add()', {
+      ...baseCfg(cwd, {
+        _classify: async () => ({
+          tier: 'complex' as const, acceptance: EXEC_ACCEPT, route: { kind: 'none' as const },
+          acceptanceProbe: { kind: 'unproven-missing' as const, why: '判据点名的路径在反面世界里不存在', missing: ['tests/new.test.ts'] },
+        }),
+        _runDag: fakeEngine([]),
+      }),
+      dag: { conductorModel: 'c:m', leafModel: 'l:m' } as ExecutorDagConfig,
+    });
+    // bench 容器里 dag-runs.db 不出容器 (R-1 已记同一条), 所以这一格只能走结果面。
+    // 证伪: 把 run-goal 里那条 acceptanceProbe spread 删掉 → 字段缺席, 下面两条红。
+    expect(r.acceptanceProbe?.kind).toBe('unproven-missing');
+    if (r.acceptanceProbe?.kind === 'unproven-missing') expect(r.acceptanceProbe.missing).toContain('tests/new.test.ts');
+  });
+
   test('没回灌 (verifier 过) ⇒ afterReinject skipped, firstVerdict pass; 注入式分类器无 llmCalls ⇒ null', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'omd-loop-ledger2-'));
     const r = await runGoal('修 add()', {
