@@ -1740,6 +1740,8 @@ async function executePlan(
               }));
               results[child.id] = r;
               depOutputs[child.id] = r.output;
+              // 绕过 settle() 也得落五位 (C-1 / INV-2): 不盖这一手, 子节点 durationMs 在账本里恒 null。
+              stampSettled(child.id);
               // map 子节点绕过外层 settle() → 此处补发 settle 事件 (INV-U6 子集独立调度)。
               emitNodeEvent(settleEvent(child.id, r));
               // G4 (2026-08-31): map 子叶**已挂进 plan.nodes** (上面那行) → 经外层 settle 累进
@@ -3538,6 +3540,35 @@ async function executePlan(
   };
 
   // settle: 写 results/depOutputs + 累加遥测 + 释放 dependents (indeg 归零 → 入 ready)。
+  /**
+   * 落账五位的**唯一**写入口 (C-1 / INV-2 单一真源, 2026-09-04 从 settle 里抽出):
+   * `durationMs` (引擎侧墙钟 `nodeStartedAt`) · `turns` · `injectedTokens` · `dagRound` · 上一轮同 id 的 `overriddenBy`。
+   *
+   * 为什么要抽: map 子节点 (`父::子`) 走 `runNode` 但**绕过 settle()** (runMapNode 内层泵自己 settle 事件),
+   * 于是账本里子节点 `durationMs` 恒 null —— 2026-08-19 到 09-04 的 255 跑里嵌套节点 49% 缺 duration,
+   * 平铺节点只缺 6%; 读数板按 >0.20 整图剔除, 主尺 O3a 的分母就是这么被吃掉的。事件面 `settleEvent`
+   * 早就从同一个 `nodeStartedAt` 算出了 durationMs, 账本却没有 = INV-2 (账本与事件面同源) 在子节点上失守。
+   * 两条路都调这一个函数, 不再各写一份。
+   *
+   * 证伪方式 (map-child-settle.test.ts): 把 runMapNode 里那次调用删掉 → 「map 子节点落账带 durationMs」即红。
+   */
+  const stampSettled = (id: string): void => {
+    const base = results[id]!;
+    const t0 = nodeStartedAt.get(id);
+    const durationMs = t0 !== undefined ? Date.now() - t0 : null;
+    const turns = base.kind === 'conductor' && typeof base.rounds === 'number' ? base.rounds : null;
+    const injectedTokens = typeof base.injectedTokens === 'number' ? base.injectedTokens : null;
+    const prev = _nodeLastSettled.get(id);
+    // ② 覆盖判据: 同一节点身份被本轮重新 settle → 上一轮的 _nodeLastSettled 条目被覆盖。
+    // `prev` 与 `currentEngineRound` 同 id 才算"被覆盖"; prev 缺席 = 该节点只跑过这一轮, 不需要标记。
+    // **最后一轮不算被覆盖** —— 它自己进 _nodeLastSettled 后, 下一轮没有同 id, 不被任何轮覆盖。
+    if (prev) {
+      prev.overriddenBy = currentEngineRound;
+    }
+    const settledLeaf = { ...base, durationMs, turns, injectedTokens, dagRound: currentEngineRound };
+    results[id] = settledLeaf;
+    _nodeLastSettled.set(id, settledLeaf);
+  };
   const settle = (id: string, r: LeafResult | null): void => {
     if (r == null) {
       const node = plan!.nodes[id]!;
@@ -3633,23 +3664,7 @@ async function executePlan(
     //
     // 同时 (③ 注入文本 token): 读 `base.injectedTokens` —— 来自 inproc 路径上游 lengths/4 的
     // 现场采集 (agent 节点 SDK 自管 prompt → 该字段未设 → 取 null, 不编 0)。
-    {
-      const base = results[id]!;
-      const t0 = nodeStartedAt.get(id);
-      const durationMs = t0 !== undefined ? Date.now() - t0 : null;
-      const turns = base.kind === 'conductor' && typeof base.rounds === 'number' ? base.rounds : null;
-      const injectedTokens = typeof base.injectedTokens === 'number' ? base.injectedTokens : null;
-      const prev = _nodeLastSettled.get(id);
-      // ② 覆盖判据: 同一节点身份被本轮重新 settle → 上一轮的 _nodeLastSettled 条目被覆盖。
-      // `prev` 与 `currentEngineRound` 同 id 才算"被覆盖"; prev 缺席 = 该节点只跑过这一轮, 不需要标记。
-      // **最后一轮不算被覆盖** —— 它自己进 _nodeLastSettled 后, 下一轮没有同 id, 不被任何轮覆盖。
-      if (prev) {
-        prev.overriddenBy = currentEngineRound;
-      }
-      const settledLeaf = { ...base, durationMs, turns, injectedTokens, dagRound: currentEngineRound };
-      results[id] = settledLeaf;
-      _nodeLastSettled.set(id, settledLeaf);
-    }
+    stampSettled(id);
     const settled = results[id]!;
     // 节点级 span: 让一条 trace 打开就是**整张图的形状**。父子关系写在 id 里 (`父::子`, D-B),
     // 所以这里不需要记账 —— recordSpan 自己从 id 解得出。
