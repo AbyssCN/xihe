@@ -36,6 +36,69 @@ const base = (over: Partial<JailPreflightInput> = {}): JailPreflightInput => ({
 /** 一切路径都是 realpath 的世界(默认);要造 symlink 世界就覆盖它。 */
 const idRealpath = { realpath: (p: string) => p };
 
+/**
+ * ⑥⑦ 的两臂世界 (2026-09-04 plana 实账)。默认 deps 走真 fs, 而 ROOT 是假路径 ——
+ * 所以这两条在既有用例里天然不触发, 基线那条"零问题"照旧绿 (已实跑确认)。
+ */
+const jsRepo = (over: { nodeOnPath?: boolean; workspaces?: boolean } = {}) => ({
+  realpath: (p: string) => p,
+  exists: (p: string) => {
+    if (p === `${ROOT}/package.json`) return true;
+    if (p.endsWith('/node')) return over.nodeOnPath ?? false;
+    return true;
+  },
+  readText: () => JSON.stringify(over.workspaces ? { workspaces: ['apps/*'] } : { name: 'x' }),
+});
+
+describe('⑥ jail 的 PATH 里有没有 node —— 四个 run 零产出的那一条', () => {
+  const withPath = (dirs: string) => [...okArgv(), '--setenv', 'PATH', dirs];
+
+  // 证伪方式: 把 checkJailArgv 里 ⑥ 那段删掉 → 本条红。
+  test('仓有 package.json 而 PATH 里没有 node → warn, 且判词点名「读数被写成假的」', () => {
+    const ps = checkJailArgv(base({ argv: withPath('/home/u/.bun/bin:/usr/bin:/bin') }), jsRepo({ nodeOnPath: false }));
+    const hit = ps.find((x) => x.what.includes('没有 node'));
+    expect(hit?.level).toBe('warn');
+    expect(hit?.fix).toContain('读数被写成假的');
+  });
+
+  test('PATH 里有 node → 不报', () => {
+    const ps = checkJailArgv(base({ argv: withPath('/opt/node/bin:/usr/bin:/bin') }), jsRepo({ nodeOnPath: true }));
+    expect(ps.some((x) => x.what.includes('没有 node'))).toBe(false);
+  });
+
+  test('不是 JS 仓 (无 package.json) → 不报 (纯 Python/Rust 仓不该被这条打扰)', () => {
+    const deps = { ...jsRepo({ nodeOnPath: false }), exists: (p: string) => !p.endsWith('/package.json') };
+    expect(checkJailArgv(base({ argv: withPath('/x/bin') }), deps).some((x) => x.what.includes('没有 node'))).toBe(false);
+  });
+});
+
+describe('⑦ workspaces monorepo 的嵌套 node_modules 全不全', () => {
+  const withNm = (...nm: string[]) => [
+    ...okArgv().flatMap((a) => [a]),
+    ...nm.flatMap((n) => ['--ro-bind', n, n]),
+  ];
+
+  // 证伪方式: 把 checkJailArgv 里 ⑦ 那段删掉 → 本条红。
+  test('声明了 workspaces 而只绑一份 node_modules → warn', () => {
+    const ps = checkJailArgv(base({ argv: withNm('/r/node_modules') }), jsRepo({ nodeOnPath: true, workspaces: true }));
+    const hit = ps.find((x) => x.what.includes('workspaces'));
+    expect(hit?.level).toBe('warn');
+    expect(hit?.fix).toContain('collectNodeModules');
+  });
+
+  test('绑齐多份 → 不报', () => {
+    const argv = withNm('/r/node_modules', '/r/apps/web/node_modules');
+    expect(
+      checkJailArgv(base({ argv }), jsRepo({ nodeOnPath: true, workspaces: true })).some((x) => x.what.includes('workspaces')),
+    ).toBe(false);
+  });
+
+  test('没声明 workspaces 的单包仓 → 不报 (只绑一份是对的)', () => {
+    const ps = checkJailArgv(base({ argv: withNm('/r/node_modules') }), jsRepo({ nodeOnPath: true, workspaces: false }));
+    expect(ps.some((x) => x.what.includes('workspaces'))).toBe(false);
+  });
+});
+
 describe('checkJailArgv —— 构造期就把挂载面对一遍', () => {
   test('★ 基线: 挂载面对得上 → 零问题(正控, 闸不是恒红)', () => {
     expect(checkJailArgv(base(), idRealpath)).toEqual([]);

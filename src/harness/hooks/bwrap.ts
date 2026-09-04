@@ -8,10 +8,14 @@
  *
  * 绑定策略 (已隔离单元验证): `--bind <root> <root>` 同路径挂 worktree (rw); 中间目录 (含主 repo 前缀)
  * 被 bwrap 建成**空目录** → `cd /主repo && ls src` 见空、`git show` 无 .git → 逃逸与 oracle 作弊双断。
- * ro-bind node_modules (自 root 向上找最近的) + bunDir → bun/tsc 可跑且解析依赖。系统只读 + /tmp + /proc + /dev。
+ * ro-bind: bunDir + **node 安装根** + root 子树下**全部** node_modules → bun/node/npx/tsc 可跑且解析依赖。
+ * 系统只读 + /tmp + /proc + /dev。后两项各有一笔实账 (2026-09-04 plana, 四个 run 零产出),
+ * 见 {@link findNodeToolchain} 与 {@link collectNodeModules} 的注 —— 共同点是
+ * **挂载面不完整不会安静失败, 它会伪装成「模型不行」**。
  * **不 --clearenv**: 继承父进程 env (provider API key 等要流进 worker); 只 --setenv HOME/PATH。
  */
-import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
+import type { Dirent } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 
@@ -29,6 +33,21 @@ function dnsBinds(): string[] {
   }
 }
 
+/**
+ * realpath,**把失败原因经返回值交出去**(仓规 §静默坑 2:fail-open 可以,吞证据不行)。
+ *
+ * 三个调用点都是**有意 fail-open** 的 —— 一个解析不了的路径 bind 进 jail 也没用,
+ * 少绑一份好过整个 argv 组装崩掉。但「为什么少绑了这一份」必须能被问出来,
+ * 所以失败走 `{ err }` 而不是静默 null。
+ */
+function tryRealpath(p: string): { path: string; err?: undefined } | { path?: undefined; err: string } {
+  try {
+    return { path: realpathSync(p) };
+  } catch (e) {
+    return { err: (e as Error).message };
+  }
+}
+
 /** 自 start 向上找最近含 node_modules 的祖先目录, 返 node_modules **真身**绝对路径 (无则 null)。
  * ⚠ realpath 是承重的 (#166 后, run 68cfb43f 实测): 隔离 worktree 的 node_modules 是指向
  * 主树的 symlink —— ro-bind 链接路径本身, jail 里链接的**目标**不可见 → typebox 悬空 ENOENT,
@@ -40,11 +59,8 @@ export function findNodeModules(start: string): string | null {
     // existsSync 跟随链接: 悬空链接在这里本来就是 false, 继续向上。realpath 抛错只剩竞态一格,
     // 那格照旧向上找真身 (fail-open, 一个解析不了依赖的路径 bind 进去也没用)。
     if (existsSync(nm)) {
-      try {
-        return realpathSync(nm);
-      } catch {
-        /* 竞态: 刚没的, 向上继续 */
-      }
+      const r = tryRealpath(nm);
+      if (r.path) return r.path;
     }
     const parent = dirname(dir);
     if (parent === dir) return null;
@@ -52,11 +68,100 @@ export function findNodeModules(start: string): string | null {
   }
 }
 
-/** leaf 隔离默认只读绑定: bun 可执行目录 + root 向上最近的 node_modules (供 bun/tsc 解析依赖)。 */
+/** 收集 node_modules 时不下钻的目录名 (下钻进去只会放大挂载面, 拿不到有用的依赖)。 */
+const NM_SKIP_DIRS = new Set(['.git', '.omd', '.next', '.turbo', 'dist', 'build', 'coverage']);
+
+/**
+ * 收集 root 子树下**全部** node_modules 真身 + 向上最近的那份 (worktree 场景)。
+ *
+ * ⚠ 为什么不能只要"最近的一个" (2026-09-04 plana 实账, 四个 run 零产出):
+ * npm/pnpm/yarn **workspaces** 的依赖是**分散在嵌套 node_modules 里**的 —— plana 有三个
+ * (根 + `apps/web` + `apps/mobile`), 只绑根那份时 jail 里 `@hookform/resolvers` 一类解析不到。
+ * 叶子看到残缺依赖树后会做任何工程师都会做的事: 跑 `npm install` 自救 —— 那次 install 又把
+ * worktree 的 workspace 软链改写成绝对路径, 造出一棵混合坏树, 报出一堆与本次改动无关的错。
+ * **一个不完整的挂载面不会安静地失败, 它会伪装成「模型不行」或「仓本来就是脏的」。**
+ *
+ * 深度上限存在的理由: 深层 node_modules 一定嵌在浅层里 (npm 的解析规则), 绑外层即可;
+ * 而无上限的 walk 在大 monorepo 上是每个 leaf 都要付一次的 IO。
+ */
+export function collectNodeModules(root: string, maxDepth = 4): string[] {
+  const out = new Set<string>();
+  const ancestor = findNodeModules(root);
+  if (ancestor) out.add(ancestor);
+  const walk = (dir: string, depth: number): void => {
+    if (depth > maxDepth) return;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true, encoding: 'utf8' });
+    } catch {
+      return; // 权限/竞态: 收不到就算了, 少绑一份好过整个组装崩掉
+    }
+    for (const e of entries) {
+      // symlink 也要认: worktree 的 node_modules 常常是指向主树的链接 (86e6cdb 同款)
+      if (!e.isDirectory() && !e.isSymbolicLink()) continue;
+      if (NM_SKIP_DIRS.has(e.name)) continue;
+      const p = join(dir, e.name);
+      if (e.name === 'node_modules') {
+        const r = tryRealpath(p);
+        if (r.path) out.add(r.path); // r.err = 悬空链接; 绑不了也没用, 少这一份
+        continue; // 不下钻进 node_modules 内部 —— 里面的嵌套份已被外层覆盖
+      }
+      walk(p, depth + 1);
+    }
+  };
+  walk(resolve(root), 0);
+  return [...out];
+}
+
+/** node 工具链在宿主上的位置。 */
+export interface NodeToolchain {
+  /** 含 `node` 可执行的目录 (真身), 进 jail 的 PATH。 */
+  binDir: string;
+  /** binDir 的父 —— 含 `bin/` 与 `lib/`, **要绑的是这个**。 */
+  rootDir: string;
+}
+
+let nodeToolchainCache: { v: NodeToolchain | null } | null = null;
+
+/**
+ * 从**宿主** PATH 上找 node,返它的 bin 目录与安装根。找不到 → null (退回原行为)。
+ *
+ * ⚠ 为什么 omd 自己跑得动却要单独找 node (2026-09-04 plana 实账): jail 的 PATH 原本是
+ * `dirname(process.execPath):/usr/bin:/bin`,而 omd 跑在 **bun** 上 → jail 里**只有 bun**。
+ * 仓的验收命令是 `npx tsc` / `npx vitest` 时全部 `command not found`;叶子退而用 bun 顶替,
+ * 而 bun 的 subpath 解析与 node 不一致,**假报 38 个测试文件失败** → 基线不可复现 → 硬约束一条都判不了。
+ *
+ * ⚠ 绑的是**安装根不是 bin**: `npm`/`npx` 是指向 `../lib/node_modules/npm/bin/*.js` 的**相对**软链,
+ * 只绑 bin 目录时那条链在 jail 里断掉 (手工绕过这个 bug 时原样踩过一次: node 能跑而 npm 找不到)。
+ *
+ * 取 realpath 再取 dirname 而不是直接用 PATH 上那一段: fnm/nvm 一类版本管理器在 PATH 上放的是
+ * **每 shell 即弃**的目录 (`/run/user/…/fnm_multishells/…`),那个路径在别的进程里根本不存在。
+ */
+export function findNodeToolchain(): NodeToolchain | null {
+  if (nodeToolchainCache) return nodeToolchainCache.v;
+  let v: NodeToolchain | null = null;
+  for (const dir of (process.env.PATH ?? '').split(':')) {
+    if (!dir) continue;
+    const cand = join(dir, 'node');
+    if (!existsSync(cand)) continue;
+    const r = tryRealpath(cand);
+    if (!r.path) continue; // r.err = 竞态/权限; 继续找 PATH 的下一段
+    const binDir = dirname(r.path);
+    v = { binDir, rootDir: dirname(binDir) };
+    break;
+  }
+  nodeToolchainCache = { v };
+  return v;
+}
+
+/**
+ * leaf 隔离默认只读绑定: bun 可执行目录 + node 安装根 + root 子树下全部 node_modules
+ * (供 bun/node/tsc 解析依赖)。两条 ⚠ 分别见 {@link findNodeToolchain} 与 {@link collectNodeModules}。
+ */
 export function defaultRoBinds(root: string): string[] {
   const bunDir = dirname(process.execPath);
-  const nm = findNodeModules(root);
-  return [bunDir, ...(nm ? [nm] : [])];
+  const node = findNodeToolchain();
+  return [...new Set([bunDir, ...(node ? [node.rootDir] : []), ...collectNodeModules(root)])];
 }
 
 /** pi agent dir 里的大只读件 (rw 副本排除、jail 内 ro 叠挂): 依赖/扩展机器 + 宿主私有 sessions。 */
@@ -180,6 +285,11 @@ export function bwrapArgs(root: string, roBinds: string[], opts: BwrapOpts = {})
   // pi bash 工具往 os.tmpdir() 写日志 → 未挂载路径 ENOENT → worker 停摆 → 超时 SIGKILL 137。
   // jail 内 tmp 一律指向 tmpfs /tmp (hermetic, 不 bind 宿主 cache)。
   for (const k of ['TMPDIR', 'TEMP', 'TMP']) args.push('--setenv', k, '/tmp');
-  args.push('--setenv', 'PATH', `${dirname(process.execPath)}:/usr/bin:/bin`);
+  // PATH: bun (omd 自己的运行时) + node 的 bin (仓的验收命令基本都是 npx/npm) + 系统。
+  // ⚠ 缺 node 那一段的代价见 findNodeToolchain 的注 —— 四个 run 零产出, 而症状伪装成「模型不行」。
+  // 找不到 node → 退回原行为 (纯 bun 仓照旧能跑), 不因为找不到就拦。
+  const nodeBin = findNodeToolchain()?.binDir;
+  const pathDirs = [...new Set([dirname(process.execPath), ...(nodeBin ? [nodeBin] : []), '/usr/bin', '/bin'])];
+  args.push('--setenv', 'PATH', pathDirs.join(':'));
   return args;
 }
