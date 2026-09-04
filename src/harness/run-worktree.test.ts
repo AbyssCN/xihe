@@ -382,6 +382,38 @@ describe('ensureNodeModulesLinks (#174: web/ 等一级子包自己的 node_modul
     expect(r[1]!.result).toContain('link-failed');
   });
 
+  /**
+   * #205-bis (2026-09-04, plana 实账): `apps/*` + `packages/*` 是最常见的 npm workspaces 约定,
+   * 子包在**第二级**。一级扫描只看 `apps/node_modules`(不存在)就跳过 —— worktree 里
+   * `apps/web/node_modules` 整个缺席。
+   *
+   * 后果不是"缺个包"这么干净: `apps/web/src/**` 解析 `@hookform/resolvers` 时沿父目录兜底
+   * 走到仓根那份, 而 npm 把它提升进了 `apps/web/node_modules` —— 兜不到。叶子看到残缺依赖树后
+   * 跑 `npm install` 自救, 那次 install 又把 worktree 的 workspace 软链改写成绝对路径,
+   * 造出混合坏树, 报出一堆与本次改动无关的错(plana: 4 个 tsc 错, 查了八个假设才定位)。
+   *
+   * 证伪方式: 把 findPackageDirsWithNodeModules 的 maxDepth 改回 1 → 本条红; 恢复后绿。
+   */
+  test('apps/* + packages/* 布局: 二级子包的 node_modules 也要链上', () => {
+    const root = mkTmp(join(osTmp(), 'omd-nmls2-'));
+    const main = join(root, 'main');
+    const wt = join(root, 'wt');
+    mkDir(join(main, 'node_modules'), { recursive: true });
+    mkDir(join(main, 'apps', 'web', 'node_modules', '@hookform'), { recursive: true });
+    mkDir(join(main, 'packages', 'engine', 'node_modules'), { recursive: true });
+    mkDir(join(main, 'apps', 'docs'), { recursive: true }); // 无 node_modules 的二级目录不该被碰
+    mkDir(join(wt, 'apps', 'web'), { recursive: true });
+    mkDir(join(wt, 'packages', 'engine'), { recursive: true });
+    mkDir(join(wt, 'apps', 'docs'), { recursive: true });
+
+    const r = ensureNodeModulesLinks(main, wt);
+    const linked = r.filter((x) => x.result === 'linked').map((x) => x.rel).sort();
+    expect(linked).toEqual(['.', 'apps/web', 'packages/engine']);
+    // 真正的失败面就是这一格: apps/web/src/** 解析被提升进子包的依赖
+    expect(exists(join(wt, 'apps', 'web', 'node_modules', '@hookform'))).toBe(true);
+    expect(exists(join(wt, 'apps', 'docs', 'node_modules'))).toBe(false);
+  });
+
   test('幂等: 第二遍全 already-present (resume 复用路每次都来一遍)', () => {
     const { main, wt } = monorepo();
     ensureNodeModulesLinks(main, wt);

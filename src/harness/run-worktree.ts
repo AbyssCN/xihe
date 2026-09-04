@@ -36,6 +36,7 @@
  * - **未提交的改动不会被带进 worktree**。`git worktree add` 出来的是**该 ref 的干净 checkout**;
  *   主树上没提交的东西在那边看不见。这是隔离的定义, 但用的人容易惊讶, 所以写在这里。
  */
+import type { Dirent } from 'node:fs';
 import { existsSync, readdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { logger } from './logger';
@@ -226,11 +227,52 @@ export function ensureNodeModulesLink(
 }
 
 /**
- * #174 (2026-08-18): #166 只链了仓根, 而一级子包 (本仓 web/) 有**自己的** node_modules ——
+ * 找出 mainRoot 下**自己带 node_modules** 的子包目录 (相对路径), 深度上限 maxDepth。
+ *
+ * ⚠ 为什么不能只扫一级 (#205-bis, 2026-09-04 plana 实账): `apps/*` + `packages/*` 是最常见的
+ * npm workspaces 约定, 子包在**第二级**。一级扫描只看 `apps/node_modules` (不存在) 就跳过,
+ * worktree 里 `apps/web/node_modules` 整个缺席。#174 的原注说"更深的路径由模块解析沿父目录兜底"
+ * —— 对提升进子包的依赖**兜不到**: `apps/web/src/**` 解析 `@hookform/resolvers` 时沿父目录走到
+ * 仓根那份, 而 npm 恰恰把它提升进了 `apps/web/node_modules`。
+ *
+ * 自带 node_modules 的目录**不再下钻** (它的子包会在它自己那份里解析)。
+ */
+function findPackageDirsWithNodeModules(
+  mainRoot: string,
+  maxDepth = 2,
+): { dirs: string[]; scanErrors: Array<{ rel: string; err: string }> } {
+  const out: string[] = [];
+  const scanErrors: Array<{ rel: string; err: string }> = [];
+  const walk = (rel: string, depth: number): void => {
+    if (depth > maxDepth) return;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(rel ? join(mainRoot, rel) : mainRoot, { withFileTypes: true, encoding: 'utf8' });
+    } catch (e) {
+      // fail-open 但不吞证据: 这一支扫不动, 别的支照旧, 原因经返回值交给调用方记账。
+      scanErrors.push({ rel: rel || '.', err: (e as Error).message });
+      return;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith('.') || e.name === 'node_modules') continue;
+      const childRel = rel ? `${rel}/${e.name}` : e.name;
+      if (existsSync(join(mainRoot, childRel, 'node_modules'))) {
+        out.push(childRel);
+        continue; // 自带一份 → 不下钻
+      }
+      walk(childRel, depth + 1);
+    }
+  };
+  walk('', 1);
+  return { dirs: out, scanErrors };
+}
+
+/**
+ * #174 (2026-08-18): #166 只链了仓根, 而子包 (本仓 web/) 有**自己的** node_modules ——
  * 隔离 run 里 `web/src/**.tsx` 解析 `react/jsx-dev-runtime` 走的是 `web/node_modules`,
  * 缺了就每个 branch 档 accept 确定性红 ×4 (run a828a672 / 60f58f3f 连撞)。
  *
- * 只扫**一级**: bun/npm workspace 的独立子包都在一级; 更深的路径由模块解析沿父目录兜底。
+ * #205-bis (2026-09-04): 扫描深度从一级放到两级 —— 理由见 {@link findPackageDirsWithNodeModules}。
  * 子目录在 worktree 里缺席 (未跟踪目录不进 checkout) → symlink ENOENT → 记 link-failed,
  * 不抛 (fail-open, 证据在返回值里)。
  */
@@ -243,14 +285,17 @@ export function ensureNodeModulesLinks(
     { rel: '.', result: ensureNodeModulesLink(mainRoot, worktreeDir, link) },
   ];
   try {
-    for (const e of readdirSync(mainRoot, { withFileTypes: true })) {
-      if (!e.isDirectory() || e.name.startsWith('.') || e.name === 'node_modules') continue;
-      if (!existsSync(join(mainRoot, e.name, 'node_modules'))) continue;
-      out.push({ rel: e.name, result: ensureNodeModulesLink(join(mainRoot, e.name), join(worktreeDir, e.name), link) });
+    const { dirs, scanErrors } = findPackageDirsWithNodeModules(mainRoot);
+    for (const rel of dirs) {
+      out.push({ rel, result: ensureNodeModulesLink(join(mainRoot, rel), join(worktreeDir, rel), link) });
+    }
+    // 中途扫不动的支也要留痕 —— 此前它是完全不可见的 (少链一份子包而没人知道为什么)。
+    for (const se of scanErrors) {
+      out.push({ rel: `(scan ${se.rel})`, result: `link-failed: 子包扫描失败: ${se.err.slice(0, 200)}` });
     }
   } catch (e) {
     // fail-open 吞异常不吞证据: 扫不了主树目录 → 仓根那条照样生效, 失败原文进结果。
-    out.push({ rel: '(scan)', result: `link-failed: 一级子包扫描失败: ${(e as Error).message.slice(0, 200)}` });
+    out.push({ rel: '(scan)', result: `link-failed: 子包扫描失败: ${(e as Error).message.slice(0, 200)}` });
   }
   return out;
 }
