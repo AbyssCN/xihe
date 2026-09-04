@@ -110,6 +110,21 @@ describe('截获: tool_use → OpenAI tool_calls', () => {
     expect(r.toolCalls).toHaveLength(1);
   });
 
+  test('★ cache_read 必须计入 in —— 否则 conductor 的 tokIn 会掉成个位数', async () => {
+    const r = await runToolCallTurn({
+      modelId: 'claude-opus-5',
+      messages: [{ role: 'user', content: 'go' }],
+      tools: TOOLS,
+      _query: fakeQuery([
+        { type: 'assistant', message: { usage: { input_tokens: 52, cache_read_input_tokens: 133467, cache_creation_input_tokens: 200, output_tokens: 4844 }, content: [{ type: 'tool_use', id: 'a', name: `mcp__${TOOLCALL_MCP_SERVER}__work`, input: {} }] } } as unknown as SDKMessage,
+      ]),
+    });
+    // 数字取自实测: code80-oc 的 conductor 记成 tokIn=52, 而 p6 同位置 (M3 字节透传) 是
+    // tokIn=146981 / cacheHit=133467 —— 91% 的输入在缓存读取里。
+    // 证伪: 去掉 cache_read_input_tokens 那一项 → in 变 52, 本条红。
+    expect(r.usage).toEqual({ in: 52 + 133467 + 200, out: 4844 });
+  });
+
   test('usage 从 result 消息读出 (没有工具调用时的口径)', async () => {
     const r = await runToolCallTurn({
       modelId: 'claude-opus-5',

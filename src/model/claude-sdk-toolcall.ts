@@ -184,8 +184,16 @@ export async function runToolCallTurn(opts: ToolCallTurnOpts): Promise<ToolCallT
       // usage 要在 abort **之前**尽量收: 截获 tool_use 就中止 → SDK 的 `result` 消息永远到不了,
       // 只读 result 会让每一轮工具调用的记账都是 0 —— 而 0 与「真的没花 token」不可分 (§静默坑 1)。
       // assistant 消息自带 usage, 从它收(实测桥回包 usage 全 0 暴露的正是这一格)。
-      const au = (m as { message?: { usage?: { input_tokens?: number; output_tokens?: number } } }).message?.usage;
-      if (au && (au.input_tokens || au.output_tokens)) usage = { in: au.input_tokens ?? 0, out: au.output_tokens ?? 0 };
+      const au = (m as {
+        message?: { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } };
+      }).message?.usage;
+      if (au) {
+        // ⚠ `input_tokens` **不含缓存读取** —— conductor 的常驻前缀几乎全是缓存命中,
+        // 实测 M3 那条路 84–91% 的输入在 cacheHit 里。只读 input_tokens 会让 conductor 的
+        // tokIn 变成个位数 (code80-oc 实测 52, 而真实是十万量级), 整批 conductor 记账全废。
+        const cin = (au.input_tokens ?? 0) + (au.cache_read_input_tokens ?? 0) + (au.cache_creation_input_tokens ?? 0);
+        if (cin || au.output_tokens) usage = { in: cin, out: au.output_tokens ?? 0 };
+      }
       if (m.type === 'assistant' && Array.isArray(m.message?.content)) {
         for (const blk of m.message.content) {
           if (blk.type === 'text' && blk.text) text += blk.text;
