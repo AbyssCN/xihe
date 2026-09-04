@@ -82,22 +82,34 @@ describe('契约编译期闸', () => {
     });
   });
 
-  test('C-2: types.ts 缺 seams.md → 抛错并点名生成器产物', () => {
-    const message = errorText(() => compile([slice(1, [TYPES, SEAM_TEST])]));
-    expect(message).toContain(SEAMS);
-    expect(message).toContain('生成器产物');
+  // ── C-2 2026-09-04 翻转: 登记面由**拒**改**扩** ────────────────────────────
+  // 这三条原本断言 compileBreakdown 抛。#243 的语义一直是「face 在并集里 = 修的权限」,
+  // 而 REGISTRATION_FACES 是硬编码表, 表永远落后于仓 —— 一道只会误缩边界的闸不该 fail-closed
+  // (实账 #254: run 8888b93b 的新闸因表外无权改 gate-registry 而 accept 红)。
+  // 现在缺 face → 自动扩进该片写集 + 记账。真源与详注在 sdd-compile.expandRegistrationFaces。
+  // ⚠ 本仓**没有**结晶期的独立 lint 模块 —— 这个 describe 名里的「编译期闸」就是全部,
+  //   `contract-lint.ts` 不存在。作者今天靠 logger 的 expansions 记录与派工文本知道扩了什么。
+
+  /** 编译后某片实施节点的 write_set —— 扩容的可见出口。 */
+  const writeSetOf = (slices: SddSlice[], id: number): string[] =>
+    (((compile(slices) as { nodes: Record<string, Record<string, unknown>> }).nodes[`s${id}`]!
+      .write_set) as string[]);
+
+  test('C-2: types.ts 缺 seams.md → 不拒, seams.md 被扩进写集', () => {
+    // 证伪: 把 expandRegistrationFaces 的 push 删掉 → 本 test 由绿转红。
+    expect(() => compile([slice(1, [TYPES, SEAM_TEST])])).not.toThrow();
+    expect(writeSetOf([slice(1, [TYPES, SEAM_TEST])], 1)).toContain(SEAMS);
   });
 
-  test('C-2: types.ts 缺 seam-catalog.test.ts → 抛错并点名结构绊线', () => {
-    const message = errorText(() => compile([slice(1, [TYPES, SEAMS])]));
-    expect(message).toContain(SEAM_TEST);
-    expect(message).toContain('结构绊线');
+  test('C-2: types.ts 缺 seam-catalog.test.ts → 不拒, 结构绊线被扩进写集', () => {
+    expect(() => compile([slice(1, [TYPES, SEAMS])])).not.toThrow();
+    expect(writeSetOf([slice(1, [TYPES, SEAMS])], 1)).toContain(SEAM_TEST);
   });
 
-  test('C-2: types.ts 缺两个伙伴 → 判词同时点名两者', () => {
-    const message = errorText(() => compile([slice(1, [TYPES])]));
-    expect(message).toContain(SEAMS);
-    expect(message).toContain(SEAM_TEST);
+  test('C-2: types.ts 缺两个伙伴 → 两者都被扩进写集', () => {
+    const ws = writeSetOf([slice(1, [TYPES])], 1);
+    expect(ws).toContain(SEAMS);
+    expect(ws).toContain(SEAM_TEST);
   });
 
   test('C-2: types.ts 带两个伙伴 → 正常编译', () => {

@@ -55,6 +55,7 @@
 import { DEFAULT_COMMAND_ALLOWLIST, LANGUAGE_PACKS } from '../command-leaf';
 import { PlanSchema, type ConductorPlan } from '../conductor-plan';
 import type { SddBreakdown, SddFalsify, SddSlice } from './sdd-direct';
+import { logger } from '../logger';
 
 export interface SddCompileOptions {
   /** 终局全量回归命令 (G-2: 整张图里只出现在 accept 节点, 恰一次)。 */
@@ -186,27 +187,65 @@ const REGISTRATION_FACES: readonly {
   },
 ];
 
+/** 一次登记面扩容的记录 (给 logger / 派工文本用: 哪一片、因哪个 trigger、扩进了哪些 face)。 */
+export interface FaceExpansion {
+  readonly sliceId: number;
+  readonly trigger: string;
+  readonly faces: readonly { readonly file: string; readonly reason: string }[];
+}
+
 /**
- * 登记面泛化闸 (#243): 任一 trigger 命中时, 全切片写集并集必须含其全部 faces。
- * 函数保名 `assertSeamWriteSet` 是为了让既有调用方零改动 (compileBreakdown 第 378 行),
- * types.ts 行的错误文本与今天逐字相同 (INV-2: 既有 sdd-compile / falsify-compile 测试零改动即绿)。
- * 不含任何 trigger 的契约走原路 (零行为差, INV-3)。
+ * 登记面泛化 (#243, 2026-09-04 由**拒**改**扩**)。
+ *
+ * ## 为什么不再抛
+ *
+ * 这条闸的语义从第一天起就是**授权**不是强制 —— 注释原话「face 在并集里 (修的权限),
+ * 不要求真被修改」。而 `REGISTRATION_FACES` 是硬编码表, **表永远落后于仓**: 表外长出新的
+ * 绊线时, 执行体明明看得出该同步登记, 却因为没权限而 accept 判红。实账 #254: B1 run
+ * 8888b93b 的新闸 `[fuse-paralysis]` 正是这样红的, owner 手补表 13→14 行才过。
+ *
+ * 一道**只会误缩边界**的闸不该 fail-closed: 它拒掉的是模型本来判断正确的那一类跑。
+ * 所以改成「缺 face → 自动扩进写集 + 记账」, 可靠性一分不减 —— 越界写仍由
+ * `checkWriteAllowed` 在工具调用那一刻拒, 做没做由 `slice-coverage` 事后对账。
+ *
+ * ## 作者仍然会知道 (但不是靠拒)
+ *
+ * 本仓**没有**结晶期的独立 lint —— `contract-lint.test.ts` 的 C-2 测的就是本编译器,
+ * 同一份实现。所以「早说 = lint / 晚拒 = 误伤」的分工在今天并不存在, 别照那个口径读。
+ * 扩容的可见出口有两个, 都是④告知层 (只报不拦): `logger.info` 的 `expansions` 记录,
+ * 和派工文本里那句「已授权你改, 但**不要求**改」。
+ * ponytail: 扩容记录还没进点火回执 (`renderIgnitionForecast`) —— 作者今天要翻日志才看得到。
+ *
+ * ## 不会造写集相交
+ *
+ * 只在 `union` 里**完全没有**该 face 时才扩, 且只扩进**第一个**含该 trigger 的片;
+ * 扩完立刻进 `union`, 后续 trigger 再命中同一 face 就跳过 ⇒ 每个 face 至多被加一次、
+ * 至多进一片。所以本函数可以安全地跑在 `assertDisjointWriteSets` **之后**
+ * (放之后是为了让相交拒因只指向 owner 的原表, 不与扩容混淆)。
+ *
+ * 反向自检 (仓规: 改闸必须当场证伪): `registration-faces.test.ts` 断言扩容后的写集
+ * 逐个含 face; 把 `host.writeSet.push` 那行删掉, 那些 test 当场由绿转红。
  */
-function assertSeamWriteSet(slices: readonly SddSlice[]): void {
-  let union: Set<string> | undefined;
+function expandRegistrationFaces(
+  slices: readonly SddSlice[],
+): { readonly slices: readonly SddSlice[]; readonly expansions: readonly FaceExpansion[] } {
+  const out = slices.map((s) => ({ ...s, writeSet: [...s.writeSet] }));
+  const union = new Set(out.flatMap((s) => s.writeSet));
+  const expansions: FaceExpansion[] = [];
   for (const { trigger, faces } of REGISTRATION_FACES) {
-    if (!slices.some((s) => s.writeSet.includes(trigger))) continue;
-    union ??= new Set(slices.flatMap((s) => s.writeSet));
-    const missing: Array<{ file: string; reason: string }> = [];
-    for (const f of faces) if (!union.has(f.file)) missing.push(f);
-    if (missing.length) {
-      const missingText = missing.map(({ file, reason }) => `${file} (${reason})`).join('、');
-      throw new Error(
-        `写集含 ${trigger} 时, 全部切片写集并集还必须包含 ${missingText}；` +
-          `缺的是 ${missing.map(({ file }) => file).join('、')}。`,
-      );
+    // 多片含同一 trigger 时取第一片: 扩容是授权, 授权给谁都够用, 而分散到多片会造相交。
+    const host = out.find((s) => s.writeSet.includes(trigger));
+    if (!host) continue;
+    const added: { file: string; reason: string }[] = [];
+    for (const f of faces) {
+      if (union.has(f.file)) continue;
+      host.writeSet.push(f.file);
+      union.add(f.file);
+      added.push(f);
     }
+    if (added.length) expansions.push({ sliceId: host.id, trigger, faces: added });
   }
+  return { slices: out, expansions };
 }
 
 /** 依赖必须指向表里真有的切片 (悬空依赖 = 图上永远没有那个前驱, 节点永不就绪)。 */
@@ -499,7 +538,6 @@ export function compileBreakdown(
   }
   assertDepsExist(slices, new Set(slices.map((s) => s.id)));
   assertDisjointWriteSets(slices);
-  assertSeamWriteSet(slices);
   if (waves) assertWaveOrder(slices, waves);
   else assertAcyclic(slices);
 
@@ -510,13 +548,31 @@ export function compileBreakdown(
   for (const s of slices) {
     const rows = falsifyById[s.id];
     if (!rows) continue;
+    // ⚠ 这一条必须判在**原表**上, 不是扩容后的表: 扩容会把登记面塞进 host 片的写集,
+    //   若在扩容后判, 一条指向登记面的 mutation 就被放过了 —— 那正是本闸要拒的「伸到片外」。
     assertFalsifyFilesInWriteSet(s, rows);
   }
+
+  // 登记面扩容 (#243 由拒改扩): owner 原表的全部校验到此为止, 下面生成节点用扩容后的写集。
+  const { slices: planSlices, expansions } = expandRegistrationFaces(slices);
+  if (expansions.length)
+    logger.info(
+      { expansions },
+      '[sdd-compile] 登记面写集扩容 (#243): 表内 trigger 命中而并集缺 face → 自动授权, 不拒',
+    );
+  /**
+   * 扩容那几个文件在派工文本里必须**与本片自己的写集分开写**: 写集那行的措辞是
+   * 「只许动这些文件」, 混进去 = 执行体读成「这些都得改」, 于是去改一个它本不必碰的登记面。
+   * 授权 ≠ 要求 —— 这是本次改动的全部语义, 派工文本里说不清就等于没改。
+   */
+  const grantedBySlice = new Map<number, readonly string[]>(
+    expansions.map((e) => [e.sliceId, e.faces.map((f) => f.file)]),
+  );
 
   const nodes: Record<string, Record<string, unknown>> = {};
   /** accept 的依赖边 = 各片 GREEN + 所有 falsify 节点 (INV-5); 单元素也照样保留。 */
   const acceptDeps: string[] = [];
-  for (const s of slices) {
+  for (const s of planSlices) {
     nodes[nodeId(s.id)] = {
       executor: 'agent',
       // 切片级契约 (名 + 写集 + verify) 进 goal。**SDD 全文不在这里内联** —— 每节点一份
@@ -524,6 +580,10 @@ export function compileBreakdown(
       goal:
         `实施切片 ${s.id}: ${s.name}\n` +
         `写集 (只许动这些文件): ${s.writeSet.join('、')}\n` +
+        (grantedBySlice.has(s.id)
+          ? `其中 ${grantedBySlice.get(s.id)!.join('、')} 是登记面: 已授权你改, 但**不要求**改 — ` +
+            `只有本片确实动了对应真源时才同步它们。\n`
+          : '') +
         `完成判据: \`${s.verify}\` 退出码 0`,
       // T-1b (S-51): 只盖在**实施节点**上。GREEN 与 falsify 都是 command 节点, 而
       // `shouldSkip` 对 command 恒不跳 (#167) —— 给它们盖章不改变任何判定, 只是噪声。

@@ -29,6 +29,7 @@ import { liveRunsNotice } from '../../harness/board/dag-run-board.js';
 import { envSummaryLine } from '../../model/bootstrap.js';
 import { listProviders } from '../../model/providers.js';
 import { defaultIsAlive } from '../run-store.js';
+import { checkCoords } from '../../harness/goal/coord-check.js';
 import { cancelDetachedRun } from '../../harness/run-control.js';
 import { loadIgnitionArgs, RECOVERABLE, resolveResumeArgs, saveIgnitionArgs } from '../../harness/run-ignition.js';
 import {
@@ -876,6 +877,31 @@ function makeDagRun(deps: DagToolDeps): OmdMcpTool {
       };
       if (!task) {
         throw new McpError(ErrorCode.InvalidParams, 'dag_run: missing required param "task"');
+      }
+      // ── #241 坐标机械校验 (2026-09-04 从 solve 补到 run) ────────────────────
+      // 那条实账**就发生在这条路上**: run 0f67293b 的 `task` 写「`saveVerdictReasonFull` 在
+      // `checkpoint-manager.ts:312`」, 符号是编的 (真名 `saveReasonFull`), 执行体照抄进
+      // `rg -e ...`, 无匹配退 1, `&&` 链首败, 下游 7 节点全 skipped, 一整跑白烧。
+      // 闸当初却只加在了 `solve` 的 goal 文本上 (checkCoords 生产端一处, goal.ts) —— run 漏接。
+      //
+      // 判定与 solve 同一份实现 (`checkCoords` 白名单三形状, 判不了的散文碎片一律不验)。
+      // `run` 没有 `force` 参数, 所以出口走**文本内**的两条 (都不改 schema, 见 coord-check
+      // §isCoordExempt): 同句写「新建」, 或同行写 `gate-allow(coord-check): <理由>`。
+      // 反向自检: `run-coord-gate.test.ts` —— 把本块删掉, 那些 test 当场由绿转红。
+      {
+        const root = deps.continuity?.repoRoot ?? process.cwd();
+        const findings = checkCoords(task, { root }).map((f) => f.message);
+        if (findings.length > 0)
+          return {
+            content: [{
+              type: 'text' as const,
+              text:
+                'dag_run 拒绝 (#241 坐标机械校验): 派工文本里的坐标与仓不符 —— 编造的符号/路径会被执行体照抄进命令 (实账 0f67293b 烧掉整跑)。\n' +
+                findings.map((m) => `- ${m}`).join('\n') +
+                '\n改正坐标; 确属新建物时在同句写明「新建」; 闸看错了就在同行写 `gate-allow(coord-check): <理由>`。',
+            }],
+            isError: true as const,
+          };
       }
       const runId = resume ?? randomUUID();
       // ── S2 执行进程化 (SDD 2026-08-10 §2) ──────────────────────────────────

@@ -17,7 +17,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createGoalTool } from './goal';
+import { createGoalTool, sddFallbackRouteHint } from './goal';
 import { RunRegistry } from '../run-registry';
 import { CheckpointManager } from '../../harness/continuity/checkpoint-manager';
 import type { RunGoalResult } from '../../harness/goal/run-goal';
@@ -41,9 +41,13 @@ const tableShell = (rows: string[]): string =>
 
 // fatal: 分解段无表 (parseBreakdown 抛) —— 触发 fatal 闸
 const SDD_FATAL = '# t\n## 契约 (Contracts)\n- G-1\n## 分解 (Breakdown)\n散文没有表\n## 非目标\n- 无';
-// fallback: 写集含 dag/types.ts 时缺 docs/architecture/seams.md + seam-catalog.test.ts —— 触发 fallback 闸
+// fallback: 两片写集相交 —— compileBreakdown 抛 → fallback。
+// 2026-09-04 换过一次样本: 原样本是「写集含 dag/types.ts 缺 seams.md」, 而 #243 登记面
+// 由**拒**改**扩**之后那份 SDD 变成 ok, 不再能钉这一支 (它会往下走到 #251 判据自证闸,
+// 测的就不是 D3 了)。写集相交同样走 compileBreakdown 抛这条路, INV-D3-1 逐字不变。
 const SDD_FALLBACK_MISSING_SEAM = tableShell([
-  '| 1 types 改动 | src/harness/dag/types.ts | — | bun test src/harness/dag/types.test.ts |',
+  '| 1 a | src/foo.ts | — | bun test src/foo.test.ts |',
+  '| 2 b | src/foo.ts | 1 | bun test src/bar.test.ts |',
 ]);
 // ok: 行内最小合法 (verify 是命令串, 写集无绊线)
 const SDD_OK = tableShell([
@@ -157,11 +161,10 @@ describe('D3 sddPath 点火空跑闸 (detached 接线点 · spawn 之前)', () =
 
     expect(out.isError).toBe(true);
     expect(out.content[0]!.text).toContain('D3 fallback');
-    // 三个文件名都得在 (sdd-compile.ts assertSeamWriteSet 的 message 是这三段拼起来的):
-    expect(out.content[0]!.text).toContain('写集含 src/harness/dag/types.ts 时');
-    expect(out.content[0]!.text).toContain('docs/architecture/seams.md');
-    expect(out.content[0]!.text).toContain('src/harness/dag/seam-catalog.test.ts');
-    expect(out.content[0]!.text).toContain('缺的是');
+    // reason 原文带出 (INV-D3-1): assertDisjointWriteSets 的 message 逐字进回执,
+    // 调用方拿它直接改 SDD (拆开写集或把两片并成一片)。
+    expect(out.content[0]!.text).toContain('写集相交');
+    expect(out.content[0]!.text).toContain('src/foo.ts');
     expect(seenSpawns).toHaveLength(0);
     expect(registry.listRuns()).toHaveLength(0);
   });
@@ -262,7 +265,7 @@ describe('D3 sddPath 点火空跑闸 (非 detached 接线点 · ignitionPrefligh
     expect(registry.listRuns()).toHaveLength(0);
   });
 
-  test('GWT★: fallback SDD + 非 detached → 同步拒, 文本含 reason 原文 (三个文件名)', async () => {
+  test('GWT★: fallback SDD + 非 detached → 同步拒, 文本含 reason 原文', async () => {
     const root = freshRoot();
     const registry = new RunRegistry();
     const tool = createGoalTool({
@@ -277,10 +280,8 @@ describe('D3 sddPath 点火空跑闸 (非 detached 接线点 · ignitionPrefligh
 
     expect(out.isError).toBe(true);
     expect(out.content[0]!.text).toContain('D3 fallback');
-    expect(out.content[0]!.text).toContain('写集含 src/harness/dag/types.ts 时');
-    expect(out.content[0]!.text).toContain('docs/architecture/seams.md');
-    expect(out.content[0]!.text).toContain('src/harness/dag/seam-catalog.test.ts');
-    expect(out.content[0]!.text).toContain('缺的是');
+    expect(out.content[0]!.text).toContain('写集相交');
+    expect(out.content[0]!.text).toContain('src/foo.ts');
     expect(registry.listRuns()).toHaveLength(0);
   });
 
@@ -462,5 +463,28 @@ describe('INV-D3-3 零涟漪 (非 sddPath / 真 resume 路径)', () => {
     });
     expect(out.isError).toBe(true);
     expect(out.content[0]!.text).toContain('D3 fatal');
+  });
+});
+// ── D3 fallback 的路径建议行 (2026-09-04) ────────────────────────────────────
+// 「分解表 verify 列全空」这句拒因逐字正确, 但读起来像「你切得不够细, 再切」——
+// 收到它的人于是去把切片切得更碎, 而更碎的切片一样写不出 verify 列。真成因通常是
+// **这活不该走 sddPath** (定位/调查类在动手前不知道根因)。建议只追加, 不改写拒因原文
+// (INV-D3-1)。
+
+describe('D3 fallback 路径建议 (sddFallbackRouteHint)', () => {
+  test('verify 列全空 → 出建议, 点名换哪条路', () => {
+    // 证伪: 把 sddFallbackRouteHint 改成恒返空串 → 本 test 由绿转红。
+    const hint = sddFallbackRouteHint('分解表 verify 列全空, 推不出终局验收命令 (见 sdd-compile.acceptCommandFromBreakdown)');
+    expect(hint).toContain('定位/调查');
+    expect(hint).toContain('dag_debug');
+    expect(hint).toContain('不给 sddPath');
+  });
+
+  test('契约本身写坏的那几种 (写集相交 / 依赖悬空) → 不出建议 (换路径解决不了)', () => {
+    // 阴性对照: 建议只认「verify 列全空」这一种可机械分辨的成因; 分辨不了就不猜。
+    // 证伪: 把 `includes('verify 列全空')` 判断删掉 (无条件出建议) → 本 test 转红。
+    expect(sddFallbackRouteHint('切片 1 与切片 2 写集相交: src/a.ts — 并发跑会互相覆盖')).toBe('');
+    expect(sddFallbackRouteHint('切片 2 依赖不存在的切片 9')).toBe('');
+    expect(sddFallbackRouteHint('')).toBe('');
   });
 });

@@ -79,29 +79,26 @@ describe('dryRunSddIgnition — fallback 分支 (verify 列空 / compileBreakdow
     expect(r.reason).toMatch(/verify.*全空|推不出终局验收命令/);
   });
 
-  test('★ 写集含 types.ts 缺 seams.md → fallback, reason 含缺的 seams.md + seam-catalog.test.ts 文件名', () => {
-    // SDD S1 测试细则点名: 写集并集缺生成器产物 → fallback 且 reason 含缺的文件名。
-    // 这条 throw 来自 compileBreakdown → assertSeamWriteSet (sdd-compile.ts:156), 我们要把
-    // 原 message 原样带出 (SDD INV-D3-1 「原因原文带出」); 改写 = 又一份判据, 漂。
-    // 证伪: 把 reason 改成固定字符串 → 本 test 转红 (没人能拿它去改 SDD 了)。
+  test('★ 2026-09-04 翻转: 写集含 types.ts 缺登记面 → ok (登记面由拒改扩, 不再阻断点火)', () => {
+    // 改前这条是 fallback。#243 的登记面语义本来就是**授权**不是强制, 而那张表永远落后于仓,
+    // 所以点火期改成自动扩容 (sdd-compile.expandRegistrationFaces), 不再拒。
+    // 证伪: 把 expandRegistrationFaces 改回抛错 → 本 test 由绿转红。
     const sdd = tableShell(['| 1 types 改动 | src/harness/dag/types.ts | — | bun test src/dag/types.test.ts |']);
-    const r = dryRunSddIgnition(sdd);
-    expect(r.kind).toBe('fallback');
-    if (r.kind !== 'fallback') throw new Error('unreachable');
-    // 既有的 sdd-compile / registration-faces 错误文本 (字节不变地进原因):
-    // 真源核对: registration-faces.test.ts:46-49
-    expect(r.reason).toContain('写集含 src/harness/dag/types.ts 时');
-    expect(r.reason).toContain('docs/architecture/seams.md');
-    expect(r.reason).toContain('src/harness/dag/seam-catalog.test.ts');
-    expect(r.reason).toContain('缺的是');
+    expect(dryRunSddIgnition(sdd).kind).toBe('ok');
   });
 
   test('★ fallback.reason 是 compileBreakdown 原 message —— 调用方拿它直接改 SDD', () => {
     // 锁 INV-D3-1「fallback reason 原文带出」: 不许改写, 不许套前缀。证伪: 在 dryRunSddIgnition 里
     // 给 reason 加一行 `[sdd-ignition]` 前缀 → 本 test 转红。
-    const sdd = tableShell(['| 1 types 改动 | src/harness/dag/types.ts | — | bun test src/dag/types.test.ts |']);
+    // 样本换成**写集相交** (原 types.ts 样本已随登记面翻转变成 ok) —— 它同样走
+    // compileBreakdown 抛 → fallback 那条路, 测的不变量逐字不变。
+    const sdd = tableShell([
+      '| 1 a | src/a.ts | — | bun test src/a.test.ts |',
+      '| 2 b | src/a.ts | 1 | bun test src/b.test.ts |',
+    ]);
     const r = dryRunSddIgnition(sdd);
     if (r.kind !== 'fallback') throw new Error(`want fallback, got ${r.kind}`);
+    expect(r.reason).toContain('写集相交');
     expect(r.reason.length).toBeGreaterThan(20);
     // 不许含「dryRunSddIgnition」/「sdd-ignition-check」这类模块名自指 (那是改写的典型形态)。
     expect(r.reason).not.toMatch(/dryRunSddIgnition|sdd-ignition-check/);
@@ -168,7 +165,12 @@ describe('dryRunSddIgnition — 三终局的相互边界 (这条闸会红的反�
       '| 1 a | src/a.ts | — |  |',
       '| 2 b | src/b.ts | 1 |  |',
     ]);
-    const fallbackCompileSdd = tableShell(['| 1 x | src/harness/dag/types.ts | — | bun test src/dag/types.test.ts |']);
+    // 「compileBreakdown 抛」这一支的样本 = 写集相交。原 types.ts 登记面样本随 #243 由拒改扩
+    // 变成了 ok, 不再能钉这一支。
+    const fallbackCompileSdd = tableShell([
+      '| 1 x | src/x.ts | — | bun test src/x.test.ts |',
+      '| 2 y | src/x.ts | 1 | bun test src/y.test.ts |',
+    ]);
     const okSdd = tableShell([
       '| 1 a | src/a.ts + test | — | bun test src/a.test.ts |',
       '| 2 b | src/b.ts + test | 1 | bun test src/b.test.ts |',

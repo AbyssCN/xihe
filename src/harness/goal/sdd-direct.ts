@@ -143,6 +143,19 @@ function splitTableRow(trimmed: string): string[] {
 
 /** 分解段起点 (与 REQUIRED_SECTIONS 同一族匹配; 段止于下一个 `## `)。 */
 const BREAKDOWN_HEADING = /^##\s*(?:分解|Breakdown)/m;
+
+/**
+ * 这份文档**打算不打算**走 sddPath 直通 (有没有分解段)。
+ *
+ * 存在的理由是 NULL≠0≠不适用: 没有分解段的计划文档跑 `parseBreakdown` 会抛, 而那是
+ * 「本文档不走直通」——**不适用**, 不是「契约写坏了」。调用方 (scripts/plan-doc-check 的
+ * 点火预演段) 拿它把两者分开; 抹平成一个 fatal 会让 149 份文档里的绝大多数被判 blocker。
+ *
+ * 只判标题在不在, 不判表好不好 —— 后者是 `parseBreakdown` 自己的领地, 别在这里抄第二份。
+ */
+export function hasBreakdownSection(text: string): boolean {
+  return BREAKDOWN_HEADING.test(text);
+}
 /** 波形行: `并行波形:{1,3} → {2}` (允许 backtick / 引用前缀 / 全半角冒号)。 */
 const WAVE_LINE = /^[>\s*-]*(?:并行波形|波形|Waves?)\s*[:：]\s*(.+)$/m;
 /**

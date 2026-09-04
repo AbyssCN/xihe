@@ -44,6 +44,7 @@ import { buildConductorSystemPrompt, CONDUCTOR_PROMPT_RESIDENT_MAX, type Conduct
 import { createConductorTools, formatRejection, invokeConductorTool } from '../conductor/tools/index';
 import type { ConductorCtx, ConductorTool } from '../conductor/types';
 import { logger } from '../logger';
+import { checkCoords } from './coord-check';
 import { briefHasRepro, computeLoopDispatchFacts, type CriterionFreeze, type ConductorCardLedger, type ConductorCardName } from './loop-ledger';
 
 /** plan 名 —— run-goal 的 `_runDag` 注入口与测试靠它认路径 (与 `goal-execute` / `goal-execute-flat` 同一约定)。 */
@@ -326,6 +327,35 @@ function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () 
         }
         // D-3: 拒因 + 完整 manual 只在这里出现 (tool result), 常驻 prompt 永远不含它。
         return { content: [{ type: 'text', text: formatRejection(compiled) }], details: { ok: false, card: card.name } };
+      }
+      // #241 坐标机械校验 (2026-09-04): conductor 写的派工文本也要过 —— 这是三个坐标缺口里最后一个。
+      //
+      // 前两个 (`solve` 的 goal / `run` 的 task) 拒在点火期, 那时只有人能改。**这一处不同**:
+      // 拒因走 tool result 回给 conductor, 它当场自己改坐标再派一次 —— 不需要人介入, 也不需要
+      // force 出口。这正是「拒了不许重试, 换一条合法的」那条纪律该有的形状。
+      //
+      // 判定与另外两处同一份实现 (`checkCoords` 白名单三形状)。误报代价 = conductor 多花一轮,
+      // 而它有两条文本内出口 (同句「新建」/ 同行 `gate-allow(coord-check): <理由>`), 判词里写明。
+      // 漏报代价 = 编造的符号照抄进 `rg -e ...`, 首败带塌整条链 (实账 run 0f67293b)。
+      //
+      // 反向自检: `orchestrating-loop-coord.test.ts` —— 把本块删掉, 那些 test 当场由绿转红。
+      {
+        const coordFindings = Object.entries(compiled.plan.nodes).flatMap(([id, node]) => {
+          const goalText = (node as { goal?: unknown }).goal;
+          return typeof goalText === 'string'
+            ? checkCoords(goalText, { root: deps.ctx.cwd }).map((f) => `[${id}] ${f.message}`)
+            : [];
+        });
+        if (coordFindings.length > 0) {
+          if (ledger) ledger.rejectedCompile++;
+          const text =
+            `[#241 坐标机械校验] 你派的图里有 ${coordFindings.length} 处坐标与仓不符, 已拒 —— ` +
+            `编造的符号/路径会被执行体照抄进命令, 无匹配即首败, 下游整条链 skipped (实账 run 0f67293b)。\n` +
+            coordFindings.map((m) => `- ${m}`).join('\n') +
+            `\n改正坐标后重派。确属**新建**物时在同一句里写明「新建」二字; ` +
+            `确认是闸看错了 (例如在讲某个符号**不**出现在某文件里), 就在同一行写 \`gate-allow(coord-check): <理由>\`。`;
+          return { content: [{ type: 'text', text }], details: { ok: false, card: card.name, coordRejected: coordFindings.length } };
+        }
       }
       // 1-A: 冻住之前, 第一个派成的派发必须是一张 work() 单独产出判据文件 —— 写集被强制为这些文件 (闸, 不是提示)。
       let compiledPlan = compiled.plan;

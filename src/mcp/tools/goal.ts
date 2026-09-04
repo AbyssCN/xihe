@@ -593,10 +593,42 @@ function sddIgnitionDryRunGate(
       type: 'text' as const,
       text:
         `dag_goal sddPath 点火拒绝 (D3 fallback · compileBreakdown/verify 列问题): ${dry.reason}\n` +
-        `改 SDD 收窄判据 / 补写集 / 改 verify 列为命令串, 或 force=true 越闸 (留账)。`,
+        `改 SDD 收窄判据 / 补写集 / 改 verify 列为命令串, 或 force=true 越闸 (留账)。\n` +
+        sddFallbackRouteHint(dry.reason),
     }],
     isError: true,
   };
+}
+
+/**
+ * D3 fallback 的**路径建议**行 (2026-09-04)。
+ *
+ * ## 为什么加
+ *
+ * 「分解表 verify 列全空」这句拒因逐字正确, 但读起来像「你切得不够细, 再切」——
+ * 于是收到它的人 (人或 conductor) 去把切片切得更碎, 而更碎的切片一样写不出 verify 列。
+ * 真正的成因通常是**这活根本不该走 sddPath**: 定位/调查类任务在动手前不知道根因,
+ * 写不出验收命令是它**应有的样子**, 不是契约没写好。
+ *
+ * 拒因原文不许改写 (INV-D3-1: 调用方要拿它直接改 SDD, 改写 = 又一份判据, 必漂), 所以
+ * 建议只能**追加**在后面, 且只在能机械分辨的那一种成因上出口 —— 分辨不了就不猜。
+ *
+ * ## 只认一种成因
+ *
+ * `verify` 列全空是 `sdd-ignition-check` 里**唯一一条自造 reason** (其余全是
+ * `compileBreakdown` 的原 exception message: 写集相交 / 依赖悬空 / 乱序 / 反向自检越界 ——
+ * 那几种都是契约本身写坏了, 换路径解决不了, 给建议等于教人绕开真问题)。
+ * 认不出 → 返空串, 回执逐字与改前相同。
+ *
+ * 反向自检: `goal-ignition-dryrun.test.ts` 的「fallback 路径建议」组 —— 把本函数改成恒返
+ * 空串, 那两条 test 当场由绿转红; 把 `includes` 判断删掉 (无条件出建议), 阴性对照那条转红。
+ */
+export function sddFallbackRouteHint(reason: string): string {
+  if (!reason.includes('verify 列全空')) return '';
+  return (
+    '↑ 若这是**定位/调查**类任务 (根因还不知道), 写不出 verify 列是它应有的样子, 不是契约没写好 —— ' +
+    '再切细也补不出那一列。换路径: `dag_debug` (带 repro / oracleCmd), 或 `solve` 不给 sddPath。'
+  );
 }
 
 /**
