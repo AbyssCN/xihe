@@ -132,6 +132,12 @@ export interface ReadoutSummary {
   excludedMissing: number;
   /** shape_id 声明率 (0..1)。 */
   shapeDeclRate: number;
+  /** O3a run 桶可量行数 (objective.md 2026-09-04 修订)。 */
+  runMeasurable: number;
+  /** O3a 主统计量: run 桶 speedup>1 占比; 桶空 → null (NULL ≠ 0)。 */
+  runShareGt1: number | null;
+  /** O3a 副统计量: run 桶 speedup 中位; 桶空 → null。 */
+  runMedian: number | null;
 }
 
 /** 剔除率超这个比例就算尺子有毛病 (objective O3a 的坏尺形态: 133/133 全剔)。 */

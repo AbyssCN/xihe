@@ -333,6 +333,10 @@ describe('summarizeReadout —— 夜链矿源摘要 (缺口 2)', () => {
       measurable: 2,
       excludedMissing: 1,
       shapeDeclRate: 1 / 3,
+      // ROWS 不带 entry → run 桶空: null 不是 0
+      runMeasurable: 0,
+      runShareGt1: null,
+      runMedian: null,
     });
   });
 
@@ -387,5 +391,27 @@ describe('§6.7 summarizeReadout 剔字段前史 (2026-09-04 修尺)', () => {
     // 没给 created_at → 全当字段后 (老调用方不变)
     const legacy = summarizeReadout([{ nodes: missNodes, shape_id: null }, { nodes: missNodes, shape_id: null }]);
     expect(legacy!.excludedMissing).toBe(2);
+  });
+});
+
+describe('O3a run 桶三格 (objective.md 2026-09-04 修订)', () => {
+  test('只有 entry∈{run,dag_run_plan} 进桶; 占比与中位按桶算; 桶空 → null 不是 0', () => {
+    const par = JSON.stringify([{ id: 'a', deps: [], durationMs: 10 }, { id: 'b', deps: [], durationMs: 10 }, { id: 'c', deps: ['a', 'b'], durationMs: 10 }]); // 3/2 = 1.5
+    const ser = JSON.stringify([{ id: 'a', deps: [], durationMs: 10 }, { id: 'b', deps: ['a'], durationMs: 10 }]); // 1.0
+    const post = DURATION_FIELD_EPOCH_S + 86_400;
+    const s = summarizeReadout([
+      { nodes: par, shape_id: null, created_at: post, entry: 'run' },
+      { nodes: ser, shape_id: null, created_at: post, entry: 'dag_run_plan' },
+      { nodes: par, shape_id: null, created_at: post, entry: 'solve' }, // 不进桶
+      { nodes: par, shape_id: null, created_at: post }, // entry 缺席: 不进桶
+    ])!;
+    expect(s.measurable).toBe(4);
+    expect(s.runMeasurable).toBe(2);
+    expect(s.runShareGt1).toBe(0.5); // 反向: 把 solve 那行也算进桶 → 2/3 即红
+    expect(s.runMedian).toBe(1.25);
+    const empty = summarizeReadout([{ nodes: par, shape_id: null, created_at: post, entry: 'solve' }])!;
+    expect(empty.runMeasurable).toBe(0);
+    expect(empty.runShareGt1).toBeNull();
+    expect(empty.runMedian).toBeNull();
   });
 });

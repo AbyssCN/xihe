@@ -246,6 +246,14 @@ describe('机械附录 (D-7)', () => {
   test('results/promotion 都读不到也不炸', () => {
     expect(renderMechanicalAppendix(null, null)).toContain('机械附录');
   });
+
+  test('O3a 段: 有读数印占比/中位/n; 桶空印 null 不印 0; 读数缺席印「无读数」', () => {
+    const md = renderMechanicalAppendix(null, null, { date: '2026-09-04', runMeasurable: 58, runShareGt1: 19 / 58, runMedian: 1 });
+    expect(md).toContain('speedup>1 占比 32.8% · 中位 1.000 · n=58');
+    const empty = renderMechanicalAppendix(null, null, { date: '2026-09-04', runMeasurable: 0, runShareGt1: null, runMedian: null });
+    expect(empty).toContain('占比 null · 中位 null · n=0'); // 反向: 把 null 印成 0 → 红
+    expect(renderMechanicalAppendix(null, null, null)).toContain('无读数');
+  });
 });
 
 describe('预登记 (四要素)', () => {

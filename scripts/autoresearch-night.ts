@@ -23,7 +23,9 @@
  * synthesize 节点只写判词与升人票; 数字表由 driver 用**机械附录**追加在文末。
  * 两半不一致以附录为准 —— 这条规则由 driver 写进晨报首行, 不靠人记。
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
+import { summarizeReadout, type ReadoutRow } from './speedup-readout';
 import { dirname, join } from 'node:path';
 import { gateCards, type CardGateCaps } from '../src/eval/replay/session-card';
 import { compileChain, type Stage, type StageChain } from '../src/harness/goal/stage-chain';
@@ -261,13 +263,55 @@ export function renderPrereg(opts: NightOpts): string {
 // ── D-7: 晨报的机械那一半 ────────────────────────────────────────────────
 
 /** 逐卡曲线 / 晋升判词 / 墙钟 —— 全部机械算, 不经 LLM。 */
+/** O3a 夜读数 (objective.md 2026-09-04 修订): run 桶 speedup>1 占比 (主) + 中位 (副)。null = 桶空 / 账本读不到, 不是 0。 */
+export type O3aReading = { date: string; runMeasurable: number; runShareGt1: number | null; runMedian: number | null };
+
+/**
+ * 从 dag-runs.db 读 O3a (只读; 读不到 → null + 一行证据, fail-open —— 层④告知, 不挡晨报)。
+ * 这是「三夜基线」的采样点: 同一把尺、同一账本, 每夜一行追加到 o3a-baseline.jsonl, 夜与夜的方差就是 2 (血统) 的噪声底。
+ */
+export function readO3a(cwd: string, date: string): O3aReading | null {
+  const p = join(cwd, '.omd', 'dag-runs.db');
+  if (!existsSync(p)) {
+    process.stderr.write(`[autoresearch-night] O3a: dag-runs.db 不在 (${p}) → 本夜无读数 (null)\n`);
+    return null;
+  }
+  try {
+    const db = new Database(p, { readonly: true });
+    const rows = db.query('select nodes, shape_id, created_at, entry from omd_dag_runs').all() as ReadoutRow[];
+    db.close();
+    const s = summarizeReadout(rows);
+    if (s === null) return { date, runMeasurable: 0, runShareGt1: null, runMedian: null };
+    return { date, runMeasurable: s.runMeasurable, runShareGt1: s.runShareGt1, runMedian: s.runMedian };
+  } catch (e) {
+    process.stderr.write(`[autoresearch-night] O3a: dag-runs.db 读取失败 → 本夜无读数 (null): ${(e as Error).message}\n`);
+    return null;
+  }
+}
+
+/** 追加一行到基线序列 (append-only)。 */
+export function appendO3aBaseline(path: string, r: O3aReading): void {
+  mkdirSync(dirname(path), { recursive: true });
+  appendFileSync(path, JSON.stringify(r) + '\n');
+}
+
 export function renderMechanicalAppendix(
   results: { cards?: { cardId: string; substrate: string; stopReason: string; wallMs: number;
     curve?: { gen: number; main: number | null; validity: number | null }[]; error?: string }[];
     reason?: string } | null,
   promotion: { verdicts?: { cardId: string; verdict: string; reason: string }[] } | null,
+  o3a: O3aReading | null = null,
 ): string {
   const lines = ['', '---', '', '## 机械附录 (driver 追加, 零 LLM)', ''];
+  // O3a 先于逐卡: 它是夜与夜之间唯一同尺可比的数 (三夜基线)。null 原样印 null (NULL ≠ 0)。
+  lines.push('### O3a (run 桶 · 字段后可量行 · 全账本累计)');
+  if (o3a === null) lines.push('- 无读数 (账本读不到, 见 stderr 证据行)');
+  else {
+    const share = o3a.runShareGt1 === null ? 'null' : `${(o3a.runShareGt1 * 100).toFixed(1)}%`;
+    const med = o3a.runMedian === null ? 'null' : o3a.runMedian.toFixed(3);
+    lines.push(`- speedup>1 占比 ${share} · 中位 ${med} · n=${o3a.runMeasurable}`);
+  }
+  lines.push('');
   const cards = results?.cards ?? [];
   if (cards.length === 0) {
     lines.push(`- 本夜零卡跑过${results?.reason ? ` (${results.reason})` : ''}。`);
@@ -467,11 +511,14 @@ if (import.meta.main) {
   const morning = join(d, 'morning.md');
   const written = existsSync(morning) ? readFileSync(morning, 'utf8') : '';
   const head = written === '' ? `# 晨报 ${args.opts.date}\n\n(report 节点未产出判词)\n` : written;
+  const o3a = readO3a(args.opts.cwd, args.opts.date);
+  if (o3a) appendO3aBaseline(join(args.opts.cwd, 'runs', 'autoresearch', 'o3a-baseline.jsonl'), o3a);
   writeFileSync(
     morning,
     `${APPENDIX_PRECEDENCE_LINE}\n\n${head}${renderMechanicalAppendix(
       readJson(join(d, 'results.json')),
       readJson(join(d, 'promotion.json')),
+      o3a,
     )}`,
   );
 

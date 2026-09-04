@@ -113,7 +113,7 @@ describe('collectCandidates fail-open', () => {
       failedRuns: () => ({ ok: true, rows: [] }),
       readout: () => ({
         ok: true,
-        summary: { speedupMedian: 2.1, measurable: 100, excludedMissing: 3, shapeDeclRate: 0.8 },
+        summary: { speedupMedian: 2.1, measurable: 100, excludedMissing: 3, shapeDeclRate: 0.8, runMeasurable: 40, runShareGt1: 0.35, runMedian: 1.1 },
       }),
       tickets: () => ({ ok: true, maps: [], inFlight: new Set() }),
       testLog: () => ({ ok: true, log: '9101 pass\n0 fail\n' }),
@@ -159,21 +159,23 @@ describe('readout 矿源真有源 (缺口 2)', () => {
     const db = new Database(join(tmp, '.omd', 'dag-runs.db'));
     // 生产表恒有 created_at (dag-record INSERT 列表); 2026-09-04 修尺后矿源按它剔字段前史,
     // 夹具两行给一个**字段后**的时刻 → 仍按「缺 duration 整图剔除」计数 (§6.7)。
-    db.run('CREATE TABLE omd_dag_runs (nodes TEXT, shape_id TEXT, outcome TEXT, created_at INTEGER)');
+    db.run('CREATE TABLE omd_dag_runs (nodes TEXT, shape_id TEXT, outcome TEXT, created_at INTEGER, entry TEXT)');
     const nodes = JSON.stringify([
       { id: 'A', deps: [], durationMs: null },
       { id: 'B', deps: ['A'], durationMs: 100 },
     ]);
     const postField = Date.UTC(2026, 7, 20) / 1000;
-    db.run('INSERT INTO omd_dag_runs (nodes, shape_id, outcome, created_at) VALUES (?, NULL, ?, ?)', [
+    db.run('INSERT INTO omd_dag_runs (nodes, shape_id, outcome, created_at, entry) VALUES (?, NULL, ?, ?, ?)', [
       nodes,
       'success',
       postField,
+      'solve',
     ]);
-    db.run('INSERT INTO omd_dag_runs (nodes, shape_id, outcome, created_at) VALUES (?, NULL, ?, ?)', [
+    db.run('INSERT INTO omd_dag_runs (nodes, shape_id, outcome, created_at, entry) VALUES (?, NULL, ?, ?, ?)', [
       nodes,
       'success',
       postField,
+      'solve',
     ]);
     db.close();
     return tmp;

@@ -346,7 +346,10 @@ export function renderMarkdown(
  * 同一个东西各改各的。
  */
 /** `created_at` 可选 (2026-09-04 修尺): 给了就按 §6.7 剔掉字段前的行; 没给 = 全当字段后 (老调用方逐字节同旧)。 */
-export type ReadoutRow = { nodes: unknown; shape_id: string | null; created_at?: number | string | null };
+export type ReadoutRow = { nodes: unknown; shape_id: string | null; created_at?: number | string | null; entry?: string | null };
+
+/** O3a 的 run 桶: conductor 自画图的入口。solve 走 SDD 平铺链, 串行为构造使然, 不进 O3a (objective.md 2026-09-04 修订)。 */
+export const O3A_RUN_ENTRIES: readonly string[] = ['run', 'dag_run_plan'];
 
 export type SpeedupReadoutSummary = {
   /** 可量行的 speedup 中位;一行都不可量 → `null`(**不是** 0)。 */
@@ -357,6 +360,12 @@ export type SpeedupReadoutSummary = {
   excludedMissing: number;
   /** `shape_id` 非缺席的行数 / 扫过的全部行数,0..1。 */
   shapeDeclRate: number;
+  /** O3a run 桶 (entry ∈ O3A_RUN_ENTRIES) 的可量行数。`entry` 缺席的行不进桶。 */
+  runMeasurable: number;
+  /** O3a 主统计量: run 桶里 speedup > 1 的占比 0..1; 桶空 → null (**不是** 0)。 */
+  runShareGt1: number | null;
+  /** O3a 副统计量: run 桶 speedup 中位; 桶空 → null。 */
+  runMedian: number | null;
 };
 
 export function summarizeReadout(rowsIn: readonly ReadoutRow[]): SpeedupReadoutSummary | null {
@@ -364,6 +373,7 @@ export function summarizeReadout(rowsIn: readonly ReadoutRow[]): SpeedupReadoutS
   const rows = rowsIn.filter((r) => !isPreDurationField(r.created_at));
   if (rows.length === 0) return null;
   const speedups: number[] = [];
+  const runSpeedups: number[] = [];
   let excludedMissing = 0;
   let declared = 0;
   for (const r of rows) {
@@ -371,14 +381,19 @@ export function summarizeReadout(rowsIn: readonly ReadoutRow[]): SpeedupReadoutS
     const parsed = parseNodesColumn(r.nodes);
     if (parsed === null) continue; // 形态异常那一桶,不进 excludedMissing
     const verdict = analyzeRun(parsed);
-    if (verdict.kind === 'ok') speedups.push(verdict.speedup);
-    else if (verdict.kind === 'excluded-missing') excludedMissing += 1;
+    if (verdict.kind === 'ok') {
+      speedups.push(verdict.speedup);
+      if (typeof r.entry === 'string' && O3A_RUN_ENTRIES.includes(r.entry)) runSpeedups.push(verdict.speedup);
+    } else if (verdict.kind === 'excluded-missing') excludedMissing += 1;
   }
   return {
     speedupMedian: speedups.length === 0 ? null : median(speedups),
     measurable: speedups.length,
     excludedMissing,
     shapeDeclRate: declared / rows.length,
+    runMeasurable: runSpeedups.length,
+    runShareGt1: runSpeedups.length === 0 ? null : runSpeedups.filter((x) => x > 1.0001).length / runSpeedups.length,
+    runMedian: runSpeedups.length === 0 ? null : median(runSpeedups),
   };
 }
 

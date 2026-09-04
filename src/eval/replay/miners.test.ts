@@ -96,6 +96,7 @@ describe('mineReadout', () => {
 
   test('主尺 null + 全剔 + shape 0% → 三条题 (objective O3a/O3b 的实测形态)', () => {
     const items = mineReadout({
+      runMeasurable: 0, runShareGt1: null, runMedian: null,
       speedupMedian: null,
       measurable: 0,
       excludedMissing: 133,
@@ -112,7 +113,7 @@ describe('mineReadout', () => {
 
   test('三维都健康 → 空 (闸不恒真)', () => {
     expect(
-      mineReadout({ speedupMedian: 1.8, measurable: 120, excludedMissing: 13, shapeDeclRate: 0.7 }),
+      mineReadout({ speedupMedian: 1.8, measurable: 120, excludedMissing: 13, shapeDeclRate: 0.7, runMeasurable: 50, runShareGt1: 0.4, runMedian: 1.2 }),
     ).toEqual([]);
   });
 });
