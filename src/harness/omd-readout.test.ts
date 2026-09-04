@@ -1873,7 +1873,7 @@ describe('omd-readout · ⑲ 编排循环 (R-1 第 4 步, 2026-09-03)', () => {
       { id: 'conductor', kind: 'agent', status: 'done', deps: [], durationMs: 1000, llmCalls: 20, selfReport: { self_report: 'leaf', acceptance_ran: true }, acceptance: { ran: false, rounds: 0, last: null }, thinking: { level: 'high', channel: 'pi' } },
       { id: 'accept', kind: 'command', status: 'done', deps: ['conductor'] },
     ], loopOf({
-      verifier: { calls: 1, firstVerdict: 'fail', target: 'criterion', reinjected: true, afterReinject: 'green' },
+      verifier: { calls: 2, firstVerdict: 'fail', target: 'criterion', reinjected: true, afterReinject: 'green', recheck: 'pass' },
       cards: { calls: 3, ok: 2, rejectedSchema: 1, help: 0, rejectedCompile: 0, childRunError: 0, byCard: { work: 1, spawn: 1 }, readOnlyShellBlocked: 0 },
       dispatches: [{ seq: 1, card: 'work', nodes: 1, briefHasRepro: true, failed: 0 }, { seq: 2, card: 'spawn', nodes: 2, briefHasRepro: false, failed: 0 }],
       dispatchesBeforeReinject: 2,
@@ -1902,7 +1902,9 @@ describe('omd-readout · ⑲ 编排循环 (R-1 第 4 步, 2026-09-03)', () => {
     expect(lp.speedup).toEqual({ ratios: [1], median: 1, unmeasurable: 1 });
     // LLM 调用: conductor 20 (P2 没报 → unmeasuredConductorRuns 1, /run 只摊给量到的 1 个); worker 10+5+3 = 18 (d2.y 没报 → 1 节点); x1 的 99 不进。
     expect(lp.llmCalls).toEqual({ conductor: 20, worker: 18, conductorPerRun: 20, workerPerRun: 9, unmeasuredConductorRuns: 1, unmeasuredWorkerNodes: 1 });
-    expect(lp.verifier).toEqual({ calls: 2, perRun: 1, firstFail: 1, reinjected: 1 });
+    // D-14 窄复审上线后 (2026-09-04): 回灌那条 run 付 2 次调用 (全量终审 1 + 窄复审 1), 判词 ≤ 2。
+    // 另一个父行是**上线前形态**的老记录 (无 recheck 字段) → 进 unknown, 不并进 skipped。
+    expect(lp.verifier).toEqual({ calls: 3, perRun: 1.5, firstFail: 1, reinjected: 1, recheck: { pass: 1, fail: 0, error: 0, skipped: 0, unknown: 1 } });
     // 回灌蒸发: 分母 = 回灌过的 (只有 P1); P1 回灌后零新派发 ∧ 绿 → 1/1。P2 没回灌不进分母 (设计 §5 的公式; §6 例子里的「1/2」把没回灌的也算进了分母, 以 §5 为准)。
     expect(lp.evaporation).toEqual({ numerator: 1, denominator: 1, rate: 1, unknown: 0 });
     expect(lp.cards.calls).toBe(4);
@@ -1924,7 +1926,7 @@ describe('omd-readout · ⑲ 编排循环 (R-1 第 4 步, 2026-09-03)', () => {
     const db = new Database(':memory:');
     createDagRecorder({ db });
     ins(db, 'p', 1, 'goal-orchestrating-loop', 'P', [['conductor']], [{ id: 'conductor', kind: 'agent', status: 'done', deps: [] }],
-      loopOf({ verifier: { calls: 1, firstVerdict: 'fail', target: 'implementation', reinjected: true, afterReinject: 'green' }, dispatches: [] }));
+      loopOf({ verifier: { calls: 2, firstVerdict: 'fail', target: 'implementation', reinjected: true, afterReinject: 'green', recheck: 'pass' }, dispatches: [] }));
     expect(readout({ db }).loop_readout.evaporation).toEqual({ numerator: 0, denominator: 0, rate: null, unknown: 1 });
   });
 

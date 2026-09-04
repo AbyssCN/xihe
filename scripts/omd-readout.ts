@@ -673,7 +673,15 @@ export interface ReadoutResult {
      * 任一侧缺席 → 该 run 进 unmeasurable, 不进 ratios。
      */
     speedup: { ratios: number[]; median: number | null; unmeasurable: number };
-    verifier: { calls: number; perRun: number | null; firstFail: number; reinjected: number };
+    /**
+     * `perRun` 判词 2026-09-04 起是 **≤ 2** (D-14 窄复审上线前是 ≤ 1): 全量终审 1 + 窄复审 1。
+     * `recheck` 四格来自 `LoopLedger.verifier.recheck`, **'error' 与 'skipped' 分开数** —— 判官坏了
+     * 与没跑复审的下一步不同 (前者查判官池, 后者本就不该跑)。老记录 (无此字段) 进 `unknown`。
+     */
+    verifier: {
+      calls: number; perRun: number | null; firstFail: number; reinjected: number;
+      recheck: { pass: number; fail: number; error: number; skipped: number; unknown: number };
+    };
     /**
      * 回灌蒸发 = reinjected ∧ afterReinject 'green' ∧ 回灌后零新派发 (dispatches.length === dispatchesBeforeReinject)。
      * 分母 = reinjected 的父 run (设计 §5 的公式); 回灌了但没记 dispatchesBeforeReinject 的老记录 → unknown 单列, 两边都不进。
@@ -1385,7 +1393,7 @@ function emptyLoopReadout(): ReadoutResult['loop_readout'] {
   return {
     parents: 0, childRows: 0, width: [], depth: [], widthStats: null, depthStats: null,
     speedup: { ratios: [], median: null, unmeasurable: 0 },
-    verifier: { calls: 0, perRun: null, firstFail: 0, reinjected: 0 },
+    verifier: { calls: 0, perRun: null, firstFail: 0, reinjected: 0, recheck: { pass: 0, fail: 0, error: 0, skipped: 0, unknown: 0 } },
     evaporation: { numerator: 0, denominator: 0, rate: null, unknown: 0 },
     cards: { calls: 0, ok: 0, rejectedSchema: 0, help: 0, rejectedCompile: 0, childRunError: 0, firstPassRate: null, byCard: {}, readOnlyShellBlocked: 0 },
     dispatches: { total: 0, perRun: null, briefTrue: 0, briefFalse: 0, briefNull: 0, briefReproRate: null },
@@ -1445,6 +1453,11 @@ function computeLoopReadout(parsed: ParsedRow[]): ReadoutResult['loop_readout'] 
     // verifier / 回灌
     out.verifier.calls += loop.verifier.calls;
     if (loop.verifier.firstVerdict === 'fail') out.verifier.firstFail++;
+    // 老记录没有 recheck 字段 → 'unknown', **不并进 'skipped'**: 「这条 run 跑在窄复审上线前」
+    // 与「跑了但没触发复审」是两件事 (§静默坑 1)。
+    const rc = loop.verifier.recheck;
+    if (rc === undefined) out.verifier.recheck.unknown++;
+    else out.verifier.recheck[rc]++;
     if (loop.verifier.reinjected) {
       out.verifier.reinjected++;
       if (loop.dispatchesBeforeReinject === undefined) out.evaporation.unknown++;
@@ -2598,7 +2611,8 @@ function printNewSegments(r: ReadoutResult, dbPath: string): void {
     console.log(`   LLM 调用: conductor ${lp.llmCalls.conductor} (${f2(lp.llmCalls.conductorPerRun)}/run, ${lp.llmCalls.unmeasuredConductorRuns} run 没记) · worker ${lp.llmCalls.worker} (${f2(lp.llmCalls.workerPerRun)}/run, ${lp.llmCalls.unmeasuredWorkerNodes} 节点没记)`);
     console.log(`   并行宽度 [${lp.width.join(',')}]${lp.widthStats ? ` min/中位/max ${lp.widthStats.min}/${lp.widthStats.median}/${lp.widthStats.max}` : ''} · 关键路径深度 [${lp.depth.join(',')}]${lp.depthStats ? ` min/中位/max ${lp.depthStats.min}/${lp.depthStats.median}/${lp.depthStats.max}` : ''}`);
     console.log(`   加速比: 中位 ${f2(lp.speedup.median)} (Σ子节点墙钟 / conductor 墙钟; 判词 > 1) · ${lp.speedup.unmeasurable} 个 run 因 durationMs 缺席不可算`);
-    console.log(`   终审: 调用 ${lp.verifier.calls} (${f2(lp.verifier.perRun)}/run, 判词 ≤ 1) · 首判红 ${lp.verifier.firstFail} · 回灌 ${lp.verifier.reinjected}`);
+    console.log(`   终审: 调用 ${lp.verifier.calls} (${f2(lp.verifier.perRun)}/run, 判词 ≤ 2) · 首判红 ${lp.verifier.firstFail} · 回灌 ${lp.verifier.reinjected}`);
+    console.log(`   D-14 窄复审: 修好 ${lp.verifier.recheck.pass} · 仍没修 ${lp.verifier.recheck.fail} · 判官调不通 ${lp.verifier.recheck.error} · 没触发 ${lp.verifier.recheck.skipped} · 上线前老记录 ${lp.verifier.recheck.unknown}`);
     console.log(`   回灌蒸发率: ${lp.evaporation.numerator}/${lp.evaporation.denominator} = ${pct(lp.evaporation.rate)} (回灌后零新派发且 oracle 绿; 老记录没分界线 ${lp.evaporation.unknown} 个不进分母)`);
     console.log(`   工具首次直达率: ${lp.cards.ok}/${lp.cards.calls} = ${pct(lp.cards.firstPassRate)} · zod 拒 ${lp.cards.rejectedSchema} · help ${lp.cards.help} · 编译拒 ${lp.cards.rejectedCompile} · 子 run 抛错 ${lp.cards.childRunError} · 只读 bash 拒 ${lp.cards.readOnlyShellBlocked} · 按卡 ${Object.entries(lp.cards.byCard).map(([k, v]) => `${k}×${v}`).join(' ') || '—'}`);
     console.log(`   brief 含复现输出 (启发式): ${lp.dispatches.briefTrue}/${lp.dispatches.briefTrue + lp.dispatches.briefFalse} = ${pct(lp.dispatches.briefReproRate)} · 无 brief 槽 ${lp.dispatches.briefNull}`);

@@ -73,7 +73,55 @@ export const CONDUCTOR_HAND_TOOLS = ['read', 'ls', 'grep', 'bash'] as const;
 export const CONDUCTOR_INFRA_FAILURE_KINDS: ReadonlySet<string> = new Set(['infra-error', 'timed-out', 'missing-capability', 'stall', 'spin-fused']);
 
 /** 回灌锚的固定首行 —— 测试与人读日志都靠它认「这一发是回灌」。 */
-export const REINJECT_ANCHOR_HEAD = '[verifier 打回 · 回灌 1 次 (D-14: 之后终态由机械 oracle 定, 终审不复审)]';
+export const REINJECT_ANCHOR_HEAD = '[verifier 打回 · 回灌 1 次 (D-14: 回灌后由机械 oracle + 一次窄复审定终态)]';
+
+/**
+ * 窄复审卷面首行 —— 与 `REINJECT_ANCHOR_HEAD` 同款:测试与人读日志靠它认「这一发是复审」。
+ */
+export const RECHECK_TASK_HEAD = '[D-14 窄复审 · 第二跑 · 只判首判 finding 修没修]';
+
+/**
+ * D-14 窄复审的卷面 (2026-09-04, owner 裁「补第二跑的复审」)。
+ *
+ * ## 为什么需要它
+ *
+ * 原 D-14 是「终审判红 → finding 回灌 → 重跑 → **终态由机械 oracle 定**」。回灌后 oracle 绿即 success,
+ * 语义层没有第二只眼。而仓规 §静默坑 3 点名的正是这一格:oracle 绿 ≠ 语义对,测试与实装由同一次改动
+ * 一起产出时会一起错并互相背书。实测代价 = owner 每条 run 手工逐条读 diff 补这一格。
+ *
+ * ## 为什么是「窄」的
+ *
+ * 复审**不重开一次全量终审**:全量审会找出与首判 finding 无关的新问题,而那些问题在第一次终审时
+ * 就有机会被提出却没有 —— 允许它们在第二跑翻案等于把「至多回灌一次」变成无限轮。所以卷面把职责
+ * 收死成一个是非题:**首判那条 finding,修了没有**。找到新问题只记进 reason 供人读,不构成否决。
+ *
+ * ## 保守方向
+ *
+ * 「拿不准 → 判 fail」与 VER-1 同向:这一跑的默认答案是"没证明修好",不是"看起来还行"。
+ */
+export function renderRecheckTask(originalTask: string, firstFinding: string): string {
+  return [
+    RECHECK_TASK_HEAD,
+    '',
+    'A cross-model verifier rejected the first attempt. The finding below was injected back into the',
+    'conductor, which then ran a second time. You are judging ONLY whether that finding is now fixed.',
+    '',
+    'Rules for this pass:',
+    '- The question is a yes/no about the finding below. Do NOT open new lines of attack.',
+    '- New problems you notice that are unrelated to the finding: mention them in `reason`, but they',
+    '  do NOT make this pass fail. They are for the owner to read, not for you to veto on.',
+    '- A mechanical oracle already passed on this tree. That is not evidence the finding is fixed —',
+    '  tests and implementation written in the same change fail together and vouch for each other.',
+    '- If you cannot show from the evidence that the finding is addressed, answer fail. Uncertain = fail.',
+    '',
+    '--- first verdict (the finding under review) ---',
+    firstFinding,
+    '--- end of finding ---',
+    '',
+    '--- original task (context only; not the thing being judged this pass) ---',
+    originalTask,
+  ].join('\n');
+}
 
 /**
  * D-14 回灌: verifier finding 原文 append 到 **同一 conductor 节点 id** 的 goal 末尾, 其它节点逐字不动。

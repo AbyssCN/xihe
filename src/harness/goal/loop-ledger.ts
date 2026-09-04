@@ -146,13 +146,26 @@ export interface LoopLedger {
   /** conductor 常驻 prompt 真跑字符数。INV-8 判词 ≤ 8000。null = 面没构造 (不该发生, 留给读侧看见)。 */
   residentPromptChars: number | null;
   verifier: {
-    /** 真调 verifier 的次数 (闸红短路 / verifier-error 不计)。INV-7 判词 ≤ 1。 */
+    /**
+     * 真调 verifier 的次数 (闸红短路 / verifier-error 不计)。INV-7 判词 **≤ 2**
+     * (2026-09-04 owner 裁「补第二跑的复审」前是 ≤ 1): 全量终审至多 1 次 + D-14 窄复审至多 1 次。
+     * 两次是不同卷面 —— 第一次找问题, 第二次只判首判 finding 修没修 (`renderRecheckTask`)。
+     */
     calls: number;
     firstVerdict: 'pass' | 'fail' | null;
     target: 'implementation' | 'criterion' | null;
     reinjected: boolean;
     /** 回灌后终局; 没回灌 (含基建守卫拦住) = 'skipped'。 */
     afterReinject: 'green' | 'red' | 'no-oracle' | 'skipped';
+    /**
+     * D-14 窄复审读数 (2026-09-04)。四格互斥, **别把 'skipped' 与 'error' 并掉** (§静默坑 1):
+     *  · 'pass'    复审判首判 finding 已修 → 放行;
+     *  · 'fail'    复审判仍没修 → verifier-rejected (机械 oracle 绿也不算);
+     *  · 'error'   复审调不通 (判卷官坏了) → fail-open 按 oracle 念, 不因判官故障改终态;
+     *  · 'skipped' 没跑复审 —— 没回灌, 或回灌后 oracle 已经红 (那时终态本来就是 verifier-rejected,
+     *              再花一次跨模型调用买不到任何新信息)。
+     */
+    recheck: 'pass' | 'fail' | 'error' | 'skipped';
   };
   /** conductor 节点基建类败因 (D-14 守卫); 缺席 = 没发生。 */
   conductorInfraFailure?: string;

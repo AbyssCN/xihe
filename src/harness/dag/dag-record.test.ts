@@ -991,7 +991,7 @@ describe('R-1 · loop 列: 只回填父行, 子 run 行与老行 NULL', () => {
     route: { kind: 'none' as const, chainHit: false },
     preActionLlmCalls: 1,
     residentPromptChars: 7900,
-    verifier: { calls: 1, firstVerdict: 'fail' as const, target: 'criterion' as const, reinjected: true, afterReinject: 'green' as const },
+    verifier: { calls: 2, firstVerdict: 'fail' as const, target: 'criterion' as const, reinjected: true, afterReinject: 'green' as const, recheck: 'pass' as const },
     cards: { calls: 3, ok: 2, rejectedSchema: 1, help: 0, rejectedCompile: 0, childRunError: 0, byCard: { work: 2 }, readOnlyShellBlocked: 1 },
     dispatches: [{ seq: 1, card: 'work' as const, nodes: 1, briefHasRepro: true, failed: 0 }],
   };

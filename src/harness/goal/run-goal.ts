@@ -93,6 +93,7 @@ import {
   CONDUCTOR_NODE_ID,
   compileOrchestratingLoop,
   withReinjectedFinding,
+  renderRecheckTask,
   checkCriterionFreeze,
   renderCriterionFreezeTruth,
 } from './orchestrating-loop';
@@ -485,6 +486,16 @@ export interface RunGoalResult {
    * 缺席 = 没配 verifier / 判过了 (pass)。
    */
   verifierDissent?: string;
+  /**
+   * **D-14 窄复审判词原文** (2026-09-04)。回灌重跑后机械 oracle 转绿时, 跨模型判卷官只回答
+   * 一个是非题「首判 finding 修了没有」的那份判词。
+   *
+   * 与 `verifierDissent` **分两位**是刻意的: 那位是第一次全量终审的判词 (找问题),
+   * 这位是第二只眼的复核 (只判那条问题修没修)。合并会让读的人分不清哪句话是谁说的。
+   * ⚠ 缺席有三种成因, 靠台账 `loop.verifier.recheck` 分辨 —— 没回灌 / 回灌后 oracle 已红
+   * (不值得再花一次调用) / 判卷官调不通 (fail-open)。**别把三者读成同一件事** (§静默坑 1)。
+   */
+  recheckDissent?: string;
   /**
    * **判据重建边的留痕** (INV-4)。缺席 = 未触发重建。
    * `proposed` 缺席 = 触发了但重建者缺席/提不出 (与"提了没过门"分开: 后者 `proposed` 在场而 `admitted` 假)。
@@ -1808,6 +1819,12 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   // 第二次 **不带 verifier** (INV-7: 终审每 run 至多一次, 这里靠"字段不在"机械保证, 不靠计数)。
   // 之后终态由机械 oracle 定 (下方 outcome 的 verifier-rejected 分支)。
   let reinjected = false;
+  /** 回灌后的图 —— 窄复审要按**第二跑真正跑的那张图**判卷, 不是首跑的 loopPlan。 */
+  let reinjectedPlan: ConductorPlan | undefined;
+  /** 首判 finding 原文 —— 窄复审的卷面主体 (`renderRecheckTask`)。 */
+  let reinjectFinding: string | undefined;
+  /** 窄复审判词原文 (pass 与 fail 都留: pass 时它是"为什么算修好了"的证据)。缺席 = 没跑复审 / 调不通。 */
+  let recheckReason: string | undefined;
   /** R-1: 回灌第二跑开始时的派发数 (两跑共用 loopLedger), 读侧据此分「回灌后有没有新派发」。 */
   let dispatchesBeforeReinject: number | undefined;
   /**
@@ -1841,12 +1858,16 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
     );
     const replanted = withReinjectedFinding(loopPlan, finding);
     try {
-      // 基座 = 第一跑的 execCfg (同一份 freezeCriterion / waiveRed / 预算), 只是 verifier 不在 (INV-7 机械保证)。
+      // 基座 = 第一跑的 execCfg (同一份 freezeCriterion / waiveRed / 预算), 只是 verifier 不在 ——
+      // 引擎侧仍然只跑一次终审 (靠"字段不在"机械保证, 不靠计数)。第二跑的语义复审由下方
+      // **run-goal 自己手动调一次**, 不经引擎、不经 tapVerifier: 这样"至多一次"是调用点数出来的。
       const { verifier: _noVerifier, ...noVerifierCfg } = withLoopConfig(loopBase, replanted, loopHost, runnable, task, loopLedger);
       void _noVerifier;
       dispatchesBeforeReinject = loopLedger.dispatches.length;
       exec = await (config._runDag ?? runExecutorDagWithPlan)(replanted, noVerifierCfg);
       reinjected = true;
+      reinjectedPlan = replanted;
+      reinjectFinding = finding;
     } catch (err) {
       return bail(`D-14 回灌重跑抛错: ${String(err).slice(0, 200)}`, 'infra-error');
     }
@@ -2325,9 +2346,50 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   // 下游一个字都不用改; 两个触发条件 (accept 没跑 / 绿是陈旧的) 也合并成一处, 不留两份会漂的判据。
   // 语义保持: #165① 那半复验绿仍然**不翻 converged** (见 `oracleRecheckGreen` 的下游用法),
   // 只把终态词从「交付没达标」换成 delivered-with-red。
+  // ── D-14 窄复审 (2026-09-04, owner 裁「补第二跑的复审」) ─────────────────────────
+  //
+  // 原形状: 回灌重跑之后**终态由机械 oracle 独自定** —— oracle 绿即 success, 语义层没有第二只眼。
+  // 而仓规 §静默坑 3 点名的就是这一格: oracle 绿 ≠ 语义对, 测试与实装由同一次改动一起产出时会
+  // 一起错并互相背书。实测代价 = owner 每条 run 手工逐条读 diff 在补它。
+  //
+  // 触发**收窄到 oracle 会放行的那一格**: 回灌后 oracle 已经红时终态本来就是 verifier-rejected,
+  // 再花一次跨模型调用买不到任何新信息。所以这次调用只发生在「机械闸说通过」的时候 —— 正是
+  // 唯一一个没有第二只眼的位置。
+  //
+  // 卷面是**窄**的 (`renderRecheckTask`): 只判首判 finding 修没修, 不许开新战线。全量复审会让
+  // 第一次终审本可提出却没提的问题在第二跑翻案, 等于把「至多回灌一次」变成无限轮。
+  //
+  // 判官坏了 (抛错) → fail-open 按 oracle 念: 判卷官故障不许改终态 (与 tapVerifier 那条
+  // 「verifier-error 不触发回灌」同向)。
+  let recheck: 'pass' | 'fail' | 'error' | 'skipped' = 'skipped';
+  const recheckOracleWouldPass = runnable ? oracleOk : false;
+  if (reinjected && recheckOracleWouldPass && config.dag.verifier && reinjectedPlan && reinjectFinding !== undefined) {
+    try {
+      verifierCalls++;
+      const verdict = await config.dag.verifier({
+        task: renderRecheckTask(task, reinjectFinding),
+        plan: reinjectedPlan,
+        results: exec.results,
+      });
+      recheck = verdict.pass ? 'pass' : 'fail';
+      recheckReason = verdict.reason;
+      logger.warn(
+        { recheck, chars: verdict.reason.length },
+        recheck === 'pass'
+          ? '[run-goal] D-14 窄复审: 首判 finding 已修 → 放行'
+          : '[run-goal] D-14 窄复审: 首判 finding 仍未修 → verifier-rejected (机械 oracle 绿不算数)',
+      );
+    } catch (err) {
+      // fail-open 吞异常**不吞证据** (§静默坑 2): 错误原文进日志, 'error' 与 'skipped' 分两格记账。
+      recheck = 'error';
+      logger.warn({ err: String(err) }, '[run-goal] D-14 窄复审调不通 → fail-open, 终态按机械 oracle 念');
+    }
+  }
   // P3 S6b / D-14: 回灌过 ∧ (回灌后机械 oracle 仍红 ∨ 本 run 无机械 oracle) ⇒ 终审的否决没被证伪, 这趟不算成。
-  // 回灌后 oracle 绿 ⇒ 照常 (success / delivered-with-red), 摘要里注记「finding 回灌 1 次, 未复审」。
-  const verifierRejected = loopUsed && ((reinjected && (runnable ? !oracleOk : true)) || criterionVeto);
+  // 2026-09-04 追加第三条: 回灌后 oracle 绿**但窄复审判首判 finding 仍没修** ⇒ 同样不算成。
+  // `recheck === 'error'` 不在此列 —— 判官坏了按 oracle 念 (fail-open), 那是 'skipped' 之外单记一格的理由。
+  const verifierRejected =
+    loopUsed && ((reinjected && (runnable ? !oracleOk : true)) || criterionVeto || recheck === 'fail');
   // conductor 死于基建 (2026-09-03): 哪怕 accept 复用了一份绿, 这趟也不算成 —— 引擎侧停 (infra-error), 不是交付达标。
   const converged = loopOk && oracleOk && !verifierRejected && conductorInfraFailure === undefined;
   // judge 异议 (判据绿收敛而 judge 判没成): **只报不翻终态** —— 这一格是判据轴「judge 太紧 /
@@ -2450,7 +2512,9 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
         : criterionInconclusiveTerminal ? TERMINAL_CRITERION_INCONCLUSIVE
         : outcome === 'verifier-rejected' ? (criterionVeto
             ? `终审否决判据 (target=criterion, 1-B): 不回灌 conductor, 走 INV-4 判据重建 (见 ${CRITERION_REBUILD_LABEL}); 被否决的判据上 oracle 绿不算证据, 本 run 不算成`
-            : `终审判红, finding 回灌 conductor 1 次后${runnable ? '机械判据仍红' : '无机械判据可证明修复'} (D-14; 终审不复审, 读 verifierDissent, **别加轮数**)`)
+            : recheck === 'fail'
+              ? `终审判红, finding 回灌 conductor 1 次后机械判据转绿, 但**窄复审判首判 finding 仍没修** (D-14; oracle 绿不算数, 读 recheckDissent, **别加轮数**)`
+              : `终审判红, finding 回灌 conductor 1 次后${runnable ? '机械判据仍红' : '无机械判据可证明修复'} (D-14; 读 verifierDissent, **别加轮数**)`)
         : outcome === 'oracle-failed' ? '环说成了但冻结判据(环外)没过 (D-I: 以判据为准)'
         // 两条路都落 delivered-with-red, 摘要必须说清是哪一条 —— 混着念就是在编现场:
         // converged=true 那条 accept **真跑真绿**, 照抄「accept 被级联压死没跑」会让读的人
@@ -2465,7 +2529,7 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
       }${oracleNote}${judgeDissent ? ' · ⚠ judge 异议: 判据绿收敛而 judge 判没成 —— 判据轴「judge 太紧/判据覆盖不够」样本, 判词见 continuity _loop-execute.json' : ''}` +
       `${flatUsed ? ` · 直通v2平铺 (并行读数: ${flatParallelism})` : ''}${flatFallback ? ` · 直通v2回落: ${flatFallback}` : ''}` +
       // P3 S6b: 循环路径的三格读数印在同一行 —— 路径身份 / 终审调用次数 (INV-7 判词 ≤1) / 回灌发生没有。
-      `${loopUsed ? ` · 编排循环 (conductor${runnable ? ' + accept' : ', 无机械判据'}) · 终审调用 ${verifierCalls} 次${reinjected ? ' · finding 回灌 1 次 (未复审)' : ''}` : ''}` +
+      `${loopUsed ? ` · 编排循环 (conductor${runnable ? ' + accept' : ', 无机械判据'}) · 终审调用 ${verifierCalls} 次${reinjected ? ` · finding 回灌 1 次 (窄复审 ${recheck})` : ''}` : ''}` +
       `${reusedNodes.length ? ` · 复用 ${reusedNodes.length} 节点` : ''}` +
       // S-51 抓法 ③: 「因契约变更而失效的片」必须印在**同一行**。S-51 那次的摘要只说
       // 「复用 6 节点」, 而「改的那件事有没有做」一个字都没有 —— 人第一眼看的正是这一行。
@@ -2505,6 +2569,7 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
           target: lastVerdict && !lastVerdict.pass ? lastVerdict.target : null,
           reinjected,
           afterReinject: !reinjected ? 'skipped' : runnable ? (oracleOk ? 'green' : 'red') : 'no-oracle',
+          recheck,
         },
         ...(conductorInfraFailure !== undefined ? { conductorInfraFailure } : {}),
         cards: {
@@ -2557,6 +2622,9 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
     ...(bestGreenFloor ? { bestGreenFloor } : {}),
     // INV-1: 否决从"物理销毁"降为"信息动作" —— 那条信息必须到得了人手上, 不能只活在引擎日志里。
     ...(lastVerdict && !lastVerdict.pass ? { verifierDissent: lastVerdict.reason } : {}),
+    // 窄复审判词与首判判词**分两个字段**: 合并会让读的人分不清"哪条是第二只眼说的"。
+    // pass 时也带 —— 那是「为什么算修好了」的唯一记录, 丢掉它 recheck:'pass' 就成了无据的一个字。
+    ...(recheckReason !== undefined ? { recheckDissent: recheckReason } : {}),
     ...(criterionRebuild ? { criterionRebuild } : {}),
    };
   // D-2 散雾出口 (切片 1): 拿到 map 句柄才开票; 没配 = 这一行直接返回, 行为逐字节不变 (INV-1)。

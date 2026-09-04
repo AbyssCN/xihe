@@ -98,7 +98,7 @@ leaf prompt 整形 seam: 注入 leaf 上下文/前缀/压缩级与档位闸 (省
 | `ownerDirectives` |  | `(round: number, nonce: string) => string` | **owner 指令通道** (S3, 2026-07-31 / D-S)。 | `src/mcp/tools/goal.ts` (1 文件) |
 | `loopBudget` |  | `{ /** 累计 leaf+conductor token(in+out)上限。 */ tokens?: numb…` | **环的预算上限**(2026-07-31)—— Loop Engineering 四条停止轴里我们唯一缺的那条。 | `src/harness/dag/engine.ts`<br>`src/harness/goal/loop-run.ts`<br>`src/mcp/tools/goal.ts` (3 文件) |
 | `_budgetAnchor` |  | `number` | #158 预算时间轴的**锚时刻** (epoch ms)。 | `src/harness/dag/engine.ts`<br>`src/mcp/tools/goal.ts` (2 文件) |
-| `verifier` |  | `VerifierFn` | 跨模型校验器 (model-agnostic skeptic, 见 verifier.ts)。 | `src/harness/verify-seats.ts`<br>`src/harness/goal/loop-run.ts`<br>`src/harness/goal/run-goal.ts` (17 文件) |
+| `verifier` |  | `VerifierFn` | 跨模型校验器 (model-agnostic skeptic, 见 verifier.ts)。 | `src/harness/verify-seats.ts`<br>`src/harness/goal/run-goal.ts`<br>`src/harness/goal/loop-run.ts` (17 文件) |
 | `maxEscalations` |  | `number` | verifier-fail → 升级重规划的最大次数 (默认 1)。 | `src/harness/verifier.ts`<br>`src/mcp/assemble.ts`<br>`src/harness/dag/engine.ts` (5 文件) |
 | `frozenNodes` |  | `readonly string[]` | **冻结判据节点**(SDD 2026-08-22 「冻结判据在重规划轮里并不冻结」)。 | `src/harness/dag/engine.ts`<br>`src/harness/dag/replan-spin.ts`<br>`src/harness/goal/loop-run.ts` (4 文件) |
 | `deterministicReplan` |  | `() => ConductorPlan \| undefined` | **平铺图确定性重规划** (SDD 2026-08-22 「升级重规划成事件」续 / 平铺图 v2)。 | `src/harness/dag/engine.ts`<br>`src/harness/goal/loop-run.ts`<br>`src/harness/goal/run-goal.ts` (3 文件) |

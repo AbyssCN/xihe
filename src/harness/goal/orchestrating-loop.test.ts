@@ -37,6 +37,7 @@ import {
   LOOP_ACCEPT_NODE_ID,
   ORCHESTRATING_LOOP_PLAN_NAME,
   REINJECT_ANCHOR_HEAD,
+  RECHECK_TASK_HEAD,
   buildConductorFace,
   compileOrchestratingLoop,
   createConductorRuntimeTools,
@@ -295,29 +296,112 @@ describe('runGoal — 编排循环是 solve 唯一的非 SDD 路径 (D-17; v1 �
   });
 });
 
-describe('D-14 — 终审恰一次 + 单次回灌不复审 (INV-7)', () => {
+describe('D-14 — 全量终审 1 次 + 回灌 1 次 + 窄复审 1 次 (INV-7 ≤ 2)', () => {
   const failingVerifier = (calls: { n: number }) => async () => {
     calls.n++;
     return { pass: false, reason: 'edge case for empty input not covered', usage: { in: 1, out: 1 } };
   };
 
-  test('★ 判红 → 第二次 _runDag: conductor goal 带回灌锚 + finding, cfg **无 verifier**; verifier 总共 1 次; 回灌后 oracle 绿 → success', async () => {
+  /**
+   * 首判红、窄复审绿的判官 —— 这是 D-14 的**正常修复路径**: 终审挑出问题, 回灌后 conductor 修好,
+   * 第二只眼确认修好了。靠卷面首行 (`RECHECK_TASK_HEAD`) 认第几发, 不靠调用计数猜。
+   */
+  const failThenPass = (calls: { n: number; recheckTask?: string }) => async (req: { task: string }) => {
+    calls.n++;
+    if (req.task.startsWith(RECHECK_TASK_HEAD)) {
+      calls.recheckTask = req.task;
+      return { pass: true, reason: 'the uncovered empty-input branch now has a test and it fails without the fix', usage: { in: 1, out: 1 } };
+    }
+    return { pass: false, reason: 'edge case for empty input not covered', usage: { in: 1, out: 1 } };
+  };
+
+  test('★ 判红 → 第二次 _runDag: conductor goal 带回灌锚 + finding, cfg **无 verifier**; 回灌后 oracle 绿 → 窄复审绿 → success', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'omd-reinject-green-'));
     const seen: Observed[] = [];
-    const vcalls = { n: 0 };
+    const vcalls: { n: number; recheckTask?: string } = { n: 0 };
     const r = await runGoal('修 add()', {
       ...baseCfg(cwd, { _classify: classify({ n: 0 }, EXEC_ACCEPT), _runDag: fakeEngine(seen) }),
-      dag: { conductorModel: 'c:m', leafModel: 'l:m', verifier: failingVerifier(vcalls) } as ExecutorDagConfig,
+      dag: { conductorModel: 'c:m', leafModel: 'l:m', verifier: failThenPass(vcalls) } as ExecutorDagConfig,
     });
     expect(seen).toHaveLength(2);
     expect(seen[1]!.plan.nodes[CONDUCTOR_NODE_ID]!.goal).toContain(REINJECT_ANCHOR_HEAD);
     expect(seen[1]!.plan.nodes[CONDUCTOR_NODE_ID]!.goal).toContain('edge case for empty input not covered');
-    // 证伪: 回灌那次不剥 verifier → fakeEngine 会再调一次, vcalls 变 2, 下面两条红。
+    // 证伪: 回灌那次不剥 verifier → fakeEngine 也会调一次, vcalls 变 3, 下面那条红。
     expect(seen[1]!.cfg.verifier).toBeUndefined();
-    expect(vcalls.n).toBe(1);
+    // 全量终审 1 + 窄复审 1 = 2 (2026-09-04 前是 1: 那时回灌后无人复审)。
+    expect(vcalls.n).toBe(2);
     expect(r.outcome).toBe('success');
     expect(r.verifierDissent).toContain('edge case');
+    expect(r.recheckDissent).toContain('now has a test');
+    expect(r.loop!.verifier.recheck).toBe('pass');
     expect(r.stages.find((s) => s.stage === 'execute')!.summary).toContain('finding 回灌 1 次');
+  });
+
+  test('★ 窄复审的卷面是**窄**的: 首行是 RECHECK_TASK_HEAD, 带首判 finding 原文 + 原任务, 并明写「拿不准判 fail」', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'omd-recheck-paper-'));
+    const vcalls: { n: number; recheckTask?: string } = { n: 0 };
+    await runGoal('修 add()', {
+      ...baseCfg(cwd, { _classify: classify({ n: 0 }, EXEC_ACCEPT), _runDag: fakeEngine([]) }),
+      dag: { conductorModel: 'c:m', leafModel: 'l:m', verifier: failThenPass(vcalls) } as ExecutorDagConfig,
+    });
+    const paper = vcalls.recheckTask!;
+    expect(paper.startsWith(RECHECK_TASK_HEAD)).toBe(true);
+    expect(paper).toContain('edge case for empty input not covered'); // 首判 finding 原文
+    expect(paper).toContain('修 add()'); // 原任务作为上下文
+    // 证伪: 把 renderRecheckTask 的这两条纪律删掉 → 复审会开新战线 / 拿不准放行, 这两条红。
+    expect(paper).toContain('Do NOT open new lines of attack');
+    expect(paper).toContain('Uncertain = fail');
+  });
+
+  test('★ 回灌后 oracle 绿但窄复审判「仍没修」→ verifier-rejected (机械 oracle 绿不算数)', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'omd-recheck-fail-'));
+    const vcalls = { n: 0 };
+    const r = await runGoal('修 add()', {
+      ...baseCfg(cwd, { _classify: classify({ n: 0 }, EXEC_ACCEPT), _runDag: fakeEngine([]) }),
+      dag: { conductorModel: 'c:m', leafModel: 'l:m', verifier: failingVerifier(vcalls) } as ExecutorDagConfig,
+    });
+    // 这是本次改动买到的那一格: 2026-09-04 之前 oracle 绿即 success, 语义层没有第二只眼。
+    // 证伪: 把 verifierRejected 里的 `|| recheck === 'fail'` 去掉 → outcome 变回 success, 这条红。
+    expect(r.outcome).toBe('verifier-rejected');
+    expect(r.converged).toBe(false);
+    expect(r.loop!.verifier.recheck).toBe('fail');
+    expect(vcalls.n).toBe(2);
+    expect(r.terminalLabel).toBe('verifier-rejected'); // 终态词不新开一格 (成因写在 summary 里)
+    expect(r.stages.find((st) => st.stage === 'execute')!.summary).toContain('窄复审判首判 finding 仍没修');
+  });
+
+  test('窄复审调不通 (判卷官抛错) → fail-open 按 oracle 念 success, recheck 记 error (与 skipped 分开)', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'omd-recheck-error-'));
+    const vcalls = { n: 0 };
+    const r = await runGoal('修 add()', {
+      ...baseCfg(cwd, { _classify: classify({ n: 0 }, EXEC_ACCEPT), _runDag: fakeEngine([]) }),
+      dag: {
+        conductorModel: 'c:m', leafModel: 'l:m',
+        verifier: async (req: { task: string }) => {
+          vcalls.n++;
+          if (req.task.startsWith(RECHECK_TASK_HEAD)) throw new Error('judge provider 503');
+          return { pass: false, reason: 'edge case for empty input not covered', usage: { in: 1, out: 1 } };
+        },
+      } as ExecutorDagConfig,
+    });
+    // 判卷官故障不许改终态 (与 tapVerifier 那条「verifier-error 不触发回灌」同向)。
+    expect(r.outcome).toBe('success');
+    expect(r.loop!.verifier.recheck).toBe('error');
+    // 证伪: 把 catch 里的 'error' 写成 'skipped' → 「判官坏了」与「没跑复审」并成一格, 这条红。
+    expect(r.recheckDissent).toBeUndefined();
+  });
+
+  test('回灌后 oracle 仍红 → 不跑窄复审 (那时终态本就是 verifier-rejected, 再调一次买不到新信息)', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'omd-recheck-skip-red-'));
+    const vcalls = { n: 0 };
+    const r = await runGoal('修 add()', {
+      ...baseCfg(cwd, { _classify: classify({ n: 0 }, EXEC_ACCEPT), _runDag: fakeEngine([], { acceptRed: (call) => call === 2 }) }),
+      dag: { conductorModel: 'c:m', leafModel: 'l:m', verifier: failingVerifier(vcalls) } as ExecutorDagConfig,
+    });
+    expect(r.outcome).toBe('verifier-rejected');
+    // 证伪: 把触发条件里的 `recheckOracleWouldPass` 去掉 → vcalls 变 2, recheck 变 'fail', 这两条红。
+    expect(vcalls.n).toBe(1);
+    expect(r.loop!.verifier.recheck).toBe('skipped');
   });
 
   test('回灌后 oracle 仍红 → verifier-rejected (不是 oracle-failed / not-converged)', async () => {
@@ -413,13 +497,19 @@ describe('R-1 账本: runGoal 结果上的 loop', () => {
     const r = await runGoal('修 add()', {
       ...baseCfg(cwd, { _classify: async () => ({ tier: 'complex', acceptance: EXEC_ACCEPT, route: { kind: 'none' }, llmCalls: 1 }), _runDag: fakeEngine(seen) }),
       // 1-B 之后 target=criterion 不再回灌 (见下一组用例); 回灌路径的样本改用 target=implementation。
-      dag: { conductorModel: 'c:m', leafModel: 'l:m', verifier: async () => { vcalls.n++; return { pass: false, reason: 'add() still returns wrong sum', target: 'implementation' as const, usage: { in: 0, out: 0 } }; } } as ExecutorDagConfig,
+      // 首判红 → 回灌 → 窄复审绿 (D-14 的正常修复路径; 靠卷面首行认第几发)。
+      dag: { conductorModel: 'c:m', leafModel: 'l:m', verifier: async (req: { task: string }) => {
+        vcalls.n++;
+        if (req.task.startsWith(RECHECK_TASK_HEAD)) return { pass: true, reason: 'sum is correct now', target: 'implementation' as const, usage: { in: 0, out: 0 } };
+        return { pass: false, reason: 'add() still returns wrong sum', target: 'implementation' as const, usage: { in: 0, out: 0 } };
+      } } as ExecutorDagConfig,
     });
     expect(r.loop).toMatchObject({
       path: 'orchestrating-loop',
       route: { kind: 'none', chainHit: false },
       preActionLlmCalls: 1,
-      verifier: { calls: 1, firstVerdict: 'fail', target: 'implementation', reinjected: true, afterReinject: 'green' },
+      // calls 2 = 全量终审 1 + 窄复审 1 (INV-7 判词 ≤ 2)。firstVerdict 仍是**首判**, 不被复审覆盖。
+      verifier: { calls: 2, firstVerdict: 'fail', target: 'implementation', reinjected: true, afterReinject: 'green', recheck: 'pass' },
     });
     expect(r.loop!.residentPromptChars).toBeGreaterThan(1000);
     expect(r.loop!.cards.calls).toBe(0);
@@ -433,7 +523,7 @@ describe('R-1 账本: runGoal 结果上的 loop', () => {
       ...baseCfg(cwd, { _classify: classify({ n: 0 }, EXEC_ACCEPT), _runDag: fakeEngine([]) }),
       dag: { conductorModel: 'c:m', leafModel: 'l:m', verifier: async () => ({ pass: true, reason: 'ok', usage: { in: 0, out: 0 } }) } as ExecutorDagConfig,
     });
-    expect(r.loop!.verifier).toEqual({ calls: 1, firstVerdict: 'pass', target: null, reinjected: false, afterReinject: 'skipped' });
+    expect(r.loop!.verifier).toEqual({ calls: 1, firstVerdict: 'pass', target: null, reinjected: false, afterReinject: 'skipped', recheck: 'skipped' });
     expect(r.loop!.preActionLlmCalls).toBeNull();
     expect(r.loop!.dispatchesBeforeReinject).toBeUndefined(); // 没回灌 = 没有分界线 (缺席, 不是 0)
   });
@@ -449,7 +539,7 @@ describe('1-B (2026-09-03): 终审否决判据 (target=criterion) → 不回灌 
     });
     expect(seen).toHaveLength(1); // 证伪: 去掉 D-14 条件里的 `!criterionVeto` → 2 (回灌了), 红
     expect(r.outcome).toBe('verifier-rejected');
-    expect(r.loop!.verifier).toEqual({ calls: 1, firstVerdict: 'fail', target: 'criterion', reinjected: false, afterReinject: 'skipped' });
+    expect(r.loop!.verifier).toEqual({ calls: 1, firstVerdict: 'fail', target: 'criterion', reinjected: false, afterReinject: 'skipped', recheck: 'skipped' });
     expect(r.loop!.dispatchesBeforeReinject).toBeUndefined();
     expect(r.criterionRebuild).toBeDefined();
     expect(r.criterionRebuild!.admitted).toBe(false);

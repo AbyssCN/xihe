@@ -17,6 +17,7 @@ import type { ConductorPlan } from '../conductor-plan';
 import type { ExecutorDagConfig, ExecutorDagResult, LeafResult } from '../dag/types';
 import { readBoard } from '../board/run-board';
 import type { ConductorCtx } from '../conductor/types';
+import { RECHECK_TASK_HEAD } from './orchestrating-loop';
 import { freezeRubric } from './rubric-spec';
 import type { GoalClassification } from './classify-acceptance';
 import { BEST_GREEN_LABEL, runGoal, TERMINAL_RUBRIC_UNWIRED, type RunGoalConfig } from './run-goal';
@@ -26,7 +27,16 @@ const EXEC_ACCEPT: GoalClassification['acceptance'] = { kind: 'executable', comm
 const EXPLORE_ACCEPT = { kind: 'exploratory', learningGoal: 'learn', acceptableLoss: 'none' } as unknown as GoalClassification['acceptance'];
 const classify = (acceptance: GoalClassification['acceptance']) => async (): Promise<GoalClassification> => ({ tier: 'complex', acceptance, route: { kind: 'none' } });
 const dissent = 'verifier 异议原文: 实装绕开了第 3 条要求';
-const failingVerifier = async () => ({ pass: false, reason: dissent, target: 'implementation' as const, usage: { in: 0, out: 0 } });
+/**
+ * **首判红、D-14 窄复审绿**。本文件测的是判据陈旧闸 / 异议留痕这些**回灌之外**的语义,
+ * 所以复审必须放行 —— 一个恒判 fail 的判官会让每条用例都在窄复审那一步翻成 verifier-rejected,
+ * 于是测到的是复审而不是本文件要测的那道闸 (2026-09-04 窄复审上线时实测到这一点)。
+ * 认第几发靠卷面首行 `RECHECK_TASK_HEAD`, 不靠调用计数猜。
+ */
+const failingVerifier = async (req: { task: string }) =>
+  req.task.startsWith(RECHECK_TASK_HEAD)
+    ? { pass: true, reason: 'finding addressed', target: 'implementation' as const, usage: { in: 0, out: 0 } }
+    : { pass: false, reason: dissent, target: 'implementation' as const, usage: { in: 0, out: 0 } };
 
 interface CallShape {
   acceptStatus?: 'done' | 'failed';

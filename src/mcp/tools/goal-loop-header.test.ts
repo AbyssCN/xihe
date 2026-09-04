@@ -60,7 +60,7 @@ describe('R-1 第 4 步: resultOut 头部 ledger 行', () => {
   test('★ summarizeGoal: 有 loop → 一行「循环:」(终审 / 回灌后新派发 / 卡直达 / 常驻字符); 无 loop → 无此行', () => {
     const loop: LoopLedger = {
       path: 'orchestrating-loop', route: { kind: 'none', chainHit: false }, preActionLlmCalls: 1, residentPromptChars: 6400,
-      verifier: { calls: 1, firstVerdict: 'fail', target: 'criterion', reinjected: true, afterReinject: 'green' },
+      verifier: { calls: 2, firstVerdict: 'fail', target: 'criterion', reinjected: true, afterReinject: 'green', recheck: 'pass' },
       cards: { calls: 3, ok: 2, rejectedSchema: 1, help: 0, rejectedCompile: 0, childRunError: 0, byCard: { work: 2 }, readOnlyShellBlocked: 0 },
       dispatches: [{ seq: 1, card: 'work', nodes: 1, briefHasRepro: true, failed: 0 }, { seq: 2, card: 'work', nodes: 1, briefHasRepro: false, failed: 0 }],
       dispatchesBeforeReinject: 2,
@@ -70,7 +70,7 @@ describe('R-1 第 4 步: resultOut 头部 ledger 行', () => {
       stages: [], sources: [], repoContext: '', converged: true, rounds: 1, reusedNodes: [], outcome: 'success',
     };
     const line = summarizeGoal({ ...base, loop }).split('\n').find((l) => l.startsWith('循环:'));
-    expect(line).toBe('循环: 终审 1 次 (首判 fail · 对象 criterion) · 回灌 是 → green · 回灌后新派发 0 · 派发 2 次 (卡 ok 2/3) · conductor 常驻 prompt 6400 字符 · 触碰 0 文件 / orphan 0 / missing 0');
+    expect(line).toBe('循环: 终审 2 次 (首判 fail · 对象 criterion) · 回灌 是 → green · 回灌后新派发 0 · 窄复审 pass · 派发 2 次 (卡 ok 2/3) · conductor 常驻 prompt 6400 字符 · 触碰 0 文件 / orphan 0 / missing 0');
     expect(summarizeGoal(base)).not.toContain('循环:');
   });
 });

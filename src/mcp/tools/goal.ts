@@ -237,6 +237,9 @@ export function summarizeGoal(r: RunGoalResult): string {
     lines.push(
       `循环: 终审 ${v.calls} 次${v.firstVerdict ? ` (首判 ${v.firstVerdict}${v.target ? ` · 对象 ${v.target}` : ''})` : ' (未调)'}` +
         ` · 回灌 ${v.reinjected ? `是 → ${v.afterReinject}${after}` : '否'}` +
+        // D-14 窄复审 (2026-09-04): 只在真跑过时占字符。'skipped' 不印 —— 没触发是常态,
+        // 印出来只会稀释这一行里真正要读的那几个数。
+        `${v.recheck && v.recheck !== 'skipped' ? ` · 窄复审 ${v.recheck}` : ''}` +
         ` · 派发 ${r.loop.dispatches.length} 次 (卡 ok ${r.loop.cards.ok}/${r.loop.cards.calls})` +
         ` · conductor 常驻 prompt ${r.loop.residentPromptChars ?? '未记'} 字符` +
         `${r.loop.conductorInfraFailure ? ` · ${r.loop.conductorInfraFailure.slice(0, 80)}` : ''}` +
