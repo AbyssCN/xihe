@@ -26,6 +26,7 @@
  * 就是"判卷标准是执行体动不了的东西")。
  */
 import { createHash, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import { runExecutorDagWithPlan } from '../dag/engine';
@@ -98,7 +99,7 @@ import {
   checkCriterionFreeze,
   renderCriterionFreezeTruth,
 } from './orchestrating-loop';
-import { createConductorCardLedger, withDispatchEvidence, type ConductorCardLedger, type LoopLedger } from './loop-ledger';
+import { countExistingTestsTouched, createConductorCardLedger, withDispatchEvidence, type ConductorCardLedger, type LoopLedger } from './loop-ledger';
 import { conductorCtxOf, withLoopConfig, type LoopHost } from './loop-run';
 
 // D-I: 两条轴的类型与分类器都归 ./acceptance (那里是判据轴的单一真源); 此处 re-export 保旧调用面。
@@ -2596,6 +2597,27 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
           recheck,
         },
         ...(conductorInfraFailure !== undefined ? { conductorInfraFailure } : {}),
+        // #205: 冻结点写进卡账本, 这里提到顶层 (与 criterionFreeze 同款分层)。缺席 = 没跑这道探针。
+        ...(loopLedger.criterionDirection !== undefined ? { criterionDirection: loopLedger.criterionDirection } : {}),
+        // #205 第三刀: 执行体改了几个仓库自带的测试文件 (环外信号, 只记账不拦)。
+        // `git cat-file -e HEAD:<path>` 判「改动前存在」; 非 git 仓 / git 调不通 → null, 不是 0。
+        existingTestsTouched: countExistingTestsTouched(
+          loopLedger.dispatches.flatMap((d) => d.filesTouched ?? []),
+          loopLedger.criterionFreeze?.files ?? [],
+          {
+            existsInHead: (rel) => {
+              try {
+                execFileSync('git', ['cat-file', '-e', `HEAD:${rel}`], { cwd: config.cwd, stdio: 'ignore' });
+                return true; // 退 0 = HEAD 里有这个路径 = 改动前就存在
+              } catch (err) {
+                // 退出码非 0 有两种成因, git 自己分不开地都抛 —— 用 stderr 分:
+                // 「不是 git 仓」= 整个读数算不出来 (null); 「HEAD 里没这个路径」= 真的是新文件 (false)。
+                const msg = String((err as { stderr?: Buffer }).stderr ?? err);
+                return /not a git repository|fatal: not a git/i.test(msg) ? null : false;
+              }
+            },
+          },
+        ),
         cards: {
           calls: loopLedger.calls,
           ok: loopLedger.ok,

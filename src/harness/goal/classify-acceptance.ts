@@ -604,6 +604,10 @@ async function classifyGoalCore(
           : null;
     const probe: AcceptanceProbe = failOpenWhy
       ? { kind: 'skipped', why: failOpenWhy }
+      // #205: **必须排在 passed-both 之前**。漏了这一支它会静默落进最后那个 `passed-both`,
+      // 也就是把「判别力没被证明」记成「证明过了」—— 正是本格要防的那件事本身。
+      : d.status === 'unproven-missing'
+        ? { kind: 'unproven-missing' as const, why: d.why, missing: d.missing }
       : d.status === 'skipped'
         ? { kind: 'vacuity-only', why: d.why }
         : d.status === 'ok' && d.why

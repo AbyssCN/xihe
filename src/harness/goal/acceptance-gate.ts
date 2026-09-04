@@ -20,7 +20,7 @@
  * ⚠ 诚实边界:确定性检查够不到"断言的词是不是执行体自己能选的"那一类,那一半走 prompt(在 `classify-acceptance.ts`)。
  * **两层各管一半,谁也别声称管全了。**
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
@@ -64,6 +64,16 @@ export interface NegativeSample {
  */
 export type AcceptanceProbe =
   | { kind: 'passed-both'; why?: string }
+  /**
+   * #205 (2026-09-04): 两道都跑了、反面世界里也确实红了, **但红的理由是判据点名的文件在那边
+   * 不存在**, 不是断言不成立 —— 判别力未被证明。
+   *
+   * **与 `passed-both` 分开是这一格存在的全部理由**: 合并进去就是把「证明过」与「没证明过」
+   * 记成同一件事, 而 code80-p5 的「绿的那边有 reward 0.0」正是从这条缝漏出去的
+   * (68 题里 67 题我们的判据文件与 bench 隐藏测试文件零交集)。
+   * fail-open: 本版**不降级**, 只让它可数。
+   */
+  | { kind: 'unproven-missing'; why: string; missing: readonly string[] }
   | { kind: 'vacuity-only'; why?: string }
   | { kind: 'demoted'; why: string }
   | { kind: 'skipped'; why: string }
@@ -568,6 +578,19 @@ export function checklistDiscriminationReason(
  */
 export type ProbeDiscriminationVerdict =
   | { status: 'ok'; weak?: string[]; why?: string }
+  /**
+   * #205 (2026-09-04, code80-p5 读数): 反面世界里命令**红了, 但红的理由是判据点名的文件在那边
+   * 根本不存在** —— 不是断言不成立。判别力**未被证明**, 与 `ok` 分开一格。
+   *
+   * 这是 `sdd-compile.ts` 头注 2026-08-22 已经认下的那条同源根因 (它为此删掉了 RED 节点:
+   * 「红的理由是「文件不存在」, 不是「断言不成立」…… 判别力为零」), 当时只堵了 SDD 那条路,
+   * 探针这条路没堵。1-A 的设计**本来就要求**判据可以指向尚不存在的文件 (criterionFiles),
+   * 于是这一格在生产上不是边角, 是常态。
+   *
+   * ⚠ fail-open: 它**不降级**判据 (与 `fail_open` / `skipped` 同待遇) —— 这一版只让"没被证明过"
+   * 可见并可数, 不改收不收。要把它升成闸, 先量它的频率 (加尺子先当尺子)。
+   */
+  | { status: 'unproven-missing'; why: string; missing: string[]; weak?: string[] }
   | { status: 'ring'; why: string; weak?: string[] }
   | { status: 'skipped'; why: string }
   | { status: 'fail_open'; why: string };
@@ -638,6 +661,28 @@ export async function probeDiscrimination(
     // #204 (D2): 逐段跑一遍 —— 整条的裁决不受它影响, 它只回答「哪几段其实什么都没证明」。
     const weak = await weakSegments(command, world.cwd, expectExit, run);
     if (exitCode !== expectExit) {
+      // ── #205: 「红」之前先问一句「红在哪」 ────────────────────────────────────
+      //
+      // 判据点名的路径在**反面世界**里不存在时, 这条命令必然非零 (pytest 退 4 / bun test 退非零),
+      // 而那与断言成不成立无关。旧实现只看退出码, 于是这类判据恒判「分得出」——
+      // code80-p5 实测: 我们的判据文件与 bench 隐藏测试文件 **68 题里 67 题零交集**,
+      // 而其中「绿的那边有 reward 0.0」正是从这里漏出去的。
+      //
+      // 用 `missingPathArgs` 而不是解析退出码: 退出码语义逐工具不同 (pytest 4/5 · bun · tsc),
+      // 解析它是又一份会漂的表; 文件在不在是确定性事实, 且与 1-A 的 criterionFiles 同一个函数
+      // (同源, 不会两处判定不一致)。
+      const missing = missingPathArgs(command, world.cwd);
+      if (missing.length > 0) {
+        return {
+          status: 'unproven-missing',
+          missing,
+          why:
+            `[unproven] 这条验收命令在反面世界里确实非零 (${exitCode}), 但它点名的 ${missing.length} 个路径` +
+            `在那边**根本不存在**: ${missing.join(', ')} —— 红的理由是文件缺席, 不是断言不成立。` +
+            `判别力未被证明 (本版不据此降级, 只记账)。`,
+          ...(weak.length > 0 ? { weak } : {}),
+        };
+      }
       // 错答案上整条命令失败 —— 通过探针。
       //
       // 但「通过」值多少钱取决于**在哪个世界里通过的**: 退回空目录时任何仓内判据都必然失败,
@@ -664,6 +709,86 @@ export async function probeDiscrimination(
     const why = `${DISCRIM_CANT_RUN}: ${String(err).slice(0, 200)}`;
     logger.warn({ command, err: String(err) }, why);
     return { status: 'fail_open', why };
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * #205 方向性探针 (2026-09-04, code80-p5 读数)。**这是判据"测没测对方向"的唯一机械检查。**
+ *
+ * ## 它回答的问题
+ *
+ * 判别力探针 (`probeDiscrimination`) 问的是「判据能不能区分对错样本」;它答得了「判据是不是虚的」,
+ * 答不了「判据量的是不是这次要改的那件事」—— 一个测错东西的测试, 只要在自己的合成错样本上红,
+ * 照样过那道闸。code80-p5 实测:我们的判据文件与 bench 隐藏测试文件 **68 题里 67 题零交集**。
+ *
+ * 这道探针问的是另一件事:把 1-A 刚写好的判据文件**放回改动前的代码**里跑一遍。
+ *  · **红** —— 好。这条判据确实在量本次要做的改动 (改动前不成立, 改完才成立)。
+ *  · **绿** —— 坏。改动前它就已经成立了 ⇒ **它测的是别的东西**, 与本次目标无关。
+ *              「conductor 写了个自己能过的测试」在机械上长的就是这个样子。
+ *
+ * ## 为什么必须等到 1-A 写完才能跑
+ *
+ * `sdd-compile.ts` 头注 2026-08-22 删掉 RED 节点的根因是「实装前跑 verify 必然是
+ * `bun test <还不存在的文件>` 的 exit 1 —— 红的理由是文件不存在, 不是断言不成立」。
+ * 那条根因在**这里不成立**:本函数在 1-A 冻结之后调用, 判据文件已经真的写出来了,
+ * 我们把它从真仓复制进 HEAD 副本, 于是「文件存在 + 实装未做」—— 那正是 O-6 当年想要而拿不到的世界。
+ *
+ * ## fail-open
+ *
+ * 本版**只记账不拦**。「改动前绿 ⇒ 方向错」这条判断目前零真实样本支撑, 直接升成闸会重复
+ * 窄复审那次 3/8 假阳性的错误 (同批实测)。先量一批频率, 再定要不要拦。
+ */
+export type CriterionDirectionVerdict =
+  /** 判据在改动前的代码上红 —— 它确实在量本次改动。 */
+  | { status: 'red-before'; why: string }
+  /** 判据在改动前就绿 —— **它测的不是本次要改的东西**。 */
+  | { status: 'green-before'; why: string }
+  /** 跑不起来 / 建不出世界 / 文件复制失败 —— 什么都没量到, 与上面两格分开记 (§静默坑 1)。 */
+  | { status: 'inconclusive'; why: string };
+
+export async function probeCriterionDirection(
+  command: string,
+  criterionFiles: readonly string[],
+  repoRoot: string,
+  expectExit = 0,
+  deps: { runIn?: (input: { command: string; cwd: string }) => Promise<{ exitCode: number | null }> } = {},
+): Promise<CriterionDirectionVerdict> {
+  if (!criterionFiles.length) return { status: 'inconclusive', why: '没有 1-A 判据文件 (判据不引用新文件, 这道探针不适用)' };
+  if (!repoRoot) return { status: 'inconclusive', why: '没有 repoRoot' };
+  let dir: string | undefined;
+  try {
+    dir = mkdtempSync(join(tmpdir(), 'omd-direction-'));
+    const world = buildNegativeWorld(dir, repoRoot);
+    // ⚠ 靠 `cwd` 判有没有建成真副本, **不靠 `why`**: 副本建成了但 node_modules 是软链/缺源时
+    // 它同样带 `why` (那只是附注)。用 `why` 判会把一批真副本误判成没建成 —— 本文件第一版
+    // 就是这么错的, 被 criterion-direction.test.ts 当场抓住。
+    if (world.cwd === dir) return { status: 'inconclusive', why: `反面世界没建成真副本: ${world.why ?? '未知'}` };
+    // 把判据文件从**真仓**(1-A 刚写好的那一份)复制进 HEAD 副本 —— 这是本探针与判别力探针
+    // 唯一的结构差别, 也是它能问出"方向"的原因。
+    for (const f of criterionFiles) {
+      const src = join(repoRoot, f);
+      if (!existsSync(src)) return { status: 'inconclusive', why: `判据文件 ${f} 在真仓里也不存在 (1-A 没写出来)` };
+      const dst = join(world.cwd, f);
+      mkdirSync(dirname(dst), { recursive: true });
+      writeFileSync(dst, readFileSync(src));
+    }
+    const run = deps.runIn ?? defaultProbeRunner;
+    const { exitCode } = await run({ command, cwd: world.cwd });
+    if (exitCode === null) return { status: 'inconclusive', why: '判据在改动前的世界里死于信号 (没拿到判词)' };
+    if (exitCode < 0) return { status: 'inconclusive', why: '判据在改动前的世界里被闸拒 (命令没跑)' };
+    if (exitCode === expectExit) {
+      return {
+        status: 'green-before',
+        why:
+          `[direction] 判据把**改动前的代码**也判成通过 (退出码 ${exitCode} = 期望值) —— ` +
+          `本次改动还没发生它就已经绿了, 所以它量的不是本次目标。判据文件: ${criterionFiles.join(', ')}`,
+      };
+    }
+    return { status: 'red-before', why: `判据在改动前的代码上红 (退出码 ${exitCode}) —— 它确实在量本次改动` };
+  } catch (err) {
+    return { status: 'inconclusive', why: `方向性探针跑不起来: ${String(err).slice(0, 160)}` };
   } finally {
     if (dir) rmSync(dir, { recursive: true, force: true });
   }

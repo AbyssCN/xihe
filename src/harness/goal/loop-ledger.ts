@@ -130,6 +130,8 @@ export interface ConductorCardLedger {
   residentPromptChars: number | null;
   /** 1-A 冻结台账 (可变; 回灌第二跑沿用, 那时 hashes 已在 → 直接受保护)。缺席 = 不适用。 */
   criterionFreeze?: CriterionFreeze;
+  /** #205 方向性探针结论 (冻结点写入; 语义见 LoopLedger.criterionDirection)。 */
+  criterionDirection?: 'red-before' | 'green-before' | 'inconclusive';
 }
 
 export function createConductorCardLedger(): ConductorCardLedger {
@@ -173,7 +175,35 @@ export interface LoopLedger {
   };
   /** conductor 节点基建类败因 (D-14 守卫); 缺席 = 没发生。 */
   conductorInfraFailure?: string;
-  cards: Omit<ConductorCardLedger, 'dispatches' | 'residentPromptChars' | 'criterionFreeze'>;
+  /**
+   * #205 方向性探针 (2026-09-04): 1-A 判据文件写好之后, 把它放回**改动前的代码**里跑一遍的结论。
+   *
+   *  · 'red-before'   判据在改动前红 —— 它确实在量本次改动 (好);
+   *  · 'green-before' 判据在改动前就绿 —— **它测的不是本次要改的东西** (坏, 「conductor 写了个
+   *                   自己能过的测试」的机械特征);
+   *  · 'inconclusive' 什么都没量到 (世界没建成 / 命令跑不起来 / 1-A 没写出文件);
+   *  · 缺席          没跑这道探针 (判据不引用新文件, 或本 run 走的不是循环路径)。
+   *
+   * ⚠ **本版 fail-open, 只记账不拦。** 「改动前绿 ⇒ 方向错」这条判断目前零真实样本支撑,
+   * 直接升成闸会重复窄复审那次 3/8 假阳性的错误。先量频率再定。
+   * ⚠ 'inconclusive' 与缺席**别并掉** (§静默坑 1): 一个是跑了没量到, 一个是压根没跑。
+   */
+  criterionDirection?: 'red-before' | 'green-before' | 'inconclusive';
+  /**
+   * #205 第三刀 (2026-09-04): 执行体**改动了仓库自带的测试文件**的条数。
+   *
+   * 为什么这是一个**不来自执行体**的信号: 仓里既有的测试是仓库作者写的, 判据由执行体自己写
+   * 这个环, 只能从环外打断。执行体去改既有测试, 与「改判据」在效果上无法区分 —— code80-p5
+   * 的根因链 (判据由被测对象产出 → 它写个自己能过的测试 → oracle 绿 → bench 0/12) 正是这一族。
+   *
+   * 判据 (启发式, 故意写在这里而不是散在调用点): 路径像测试 (含 `test`/`spec` 段) ∧ 改动前
+   * 在 git 里已存在 ∧ 不在 1-A criterionFiles 里 (那些是本次该写的新文件, 不算既有)。
+   * ⚠ **本版只记账不拦**, 与方向性探针同待遇: 先量频率再定要不要升成闸。
+   * ⚠ `null` = 算不出来 (仓不是 git / git 调不通), 与 `0` (真的一条没改) **分开** (§静默坑 1)。
+   */
+  existingTestsTouched?: number | null;
+
+  cards: Omit<ConductorCardLedger, 'dispatches' | 'residentPromptChars' | 'criterionFreeze' | 'criterionDirection'>;
   dispatches: LoopDispatch[];
   /** 1-A 冻结台账 (收尾时 `tampered` 已核)。缺席 = 判据不引用未存在文件。 */
   criterionFreeze?: CriterionFreeze;
@@ -312,4 +342,39 @@ export function withDispatchEvidence<T extends { truths?: JudgingTruths }>(
   const dispatchEvidence = renderDispatchEvidenceTruth(dispatches, opts);
   if (!dispatchEvidence) return req;
   return { ...req, truths: { ...(req.truths ?? {}), dispatchEvidence } };
+}
+
+/**
+ * #205 第三刀 (2026-09-04): 数「执行体改了几个**仓库自带的**测试文件」。
+ *
+ * 这是本 run 里唯一一个**不来自执行体**的信号源: 判据由被测对象自己写这个环, 只能从环外打断。
+ * 仓里既有的测试是仓库作者写的 —— 执行体去改它们, 与「改判据」在效果上分不开。
+ *
+ * 三个条件同时成立才算一条 (缺一都会把正常改动误报成可疑):
+ *  ① 路径像测试 —— 含 `test` / `spec` 路径段或文件名前后缀;
+ *  ② 改动前在 git 里**已存在** —— `git cat-file -e HEAD:<path>`, 新写的测试不算;
+ *  ③ 不在 1-A `criterionFiles` 里 —— 那些正是本次该写的判据文件, 写它们是被要求的。
+ *
+ * @returns 条数; git 调不通 / 不是 git 仓 → `null` (**算不出来 ≠ 0 条**, §静默坑 1)。
+ */
+export function countExistingTestsTouched(
+  filesTouched: readonly string[],
+  criterionFiles: readonly string[],
+  deps: { existsInHead: (path: string) => boolean | null },
+): number | null {
+  const isTestPath = (p: string): boolean => {
+    const norm = p.split('\\').join('/').toLowerCase();
+    // 段级匹配而不是裸 `includes('test')`: 后者会把 `src/latest.ts` / `src/contest/x.ts` 算进来。
+    return norm.split('/').some((seg) => /(^|[._-])(tests?|specs?)([._-]|$)/.test(seg));
+  };
+  const frozen = new Set(criterionFiles.map((f) => f.split('\\').join('/')));
+  let n = 0;
+  for (const raw of filesTouched) {
+    const f = raw.split('\\').join('/');
+    if (!isTestPath(f) || frozen.has(f)) continue;
+    const existed = deps.existsInHead(f);
+    if (existed === null) return null; // git 说不出话 → 整个读数作废, 不返半个数
+    if (existed) n++;
+  }
+  return n;
 }

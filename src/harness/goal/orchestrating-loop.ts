@@ -37,6 +37,7 @@ import { z } from 'zod';
 import { withProtectedPaths, type AnyOmdTool } from '../agent-tools';
 import { join } from 'node:path';
 import { hashArtifact } from '../continuity/checkpoint-manager';
+import { probeCriterionDirection } from './acceptance-gate';
 import type { ConductorPlan } from '../conductor-plan';
 import type { ExecutorDagResult, LeafResult } from '../dag/types';
 import type { LeafFace } from '../leaf-runners';
@@ -453,6 +454,36 @@ function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () 
           ? `\n[1-A 判据文件已冻结: ${freeze.files.map((f) => `${f} ${hashes[f] ? `(${hashes[f]})` : '(仍不存在 — 没冻住, 判据对它仍恒红)'}`).join(' · ')}; 之后的派发不得改它们 (工具写当场拒)]`
           : `\n[1-A 判据文件一个都没写出来 (${freeze.files.join(', ')}); 下一个派发仍必须是单独写它们的 work()]`;
         logger.info({ seq: n, hashes, frozen: freeze.frozen }, '[orchestrating-loop] 1-A 判据文件冻结');
+        // ── #205 方向性探针 (2026-09-04) ────────────────────────────────────────
+        //
+        // **这是唯一能问出「判据测没测对方向」的时刻**: 判据文件刚写出来 (存在了), 而实装还没做。
+        // 把它放回改动前的代码里跑 —— 红 = 它在量本次改动; 绿 = 改动前就成立, 那它量的是别的东西。
+        //
+        // 为什么以前拿不到这个读数: `sdd-compile.ts` 2026-08-22 删 RED 节点的根因是「实装前跑
+        // verify 必然是 `bun test <还不存在的文件>`, 红的理由是文件不存在」—— 那条根因在这里
+        // **不成立**, 因为 1-A 保证了文件此刻已经写出来。
+        //
+        // fail-open 三层: 只在冻住了 (文件真写出来) + 有可跑判据时才跑; 抛错吞掉但留证据;
+        // 结论只进账本, **不翻终态、不拦派发** (「改动前绿 ⇒ 方向错」零真实样本支撑, 先量再拦)。
+        if (freeze.frozen && deps.ctx.acceptance && ledger) {
+          try {
+            const dv = await probeCriterionDirection(
+              deps.ctx.acceptance.command,
+              freeze.protectedFiles,
+              freeze.root,
+              deps.ctx.acceptance.expect_exit,
+            );
+            ledger.criterionDirection = dv.status;
+            logger[dv.status === 'green-before' ? 'warn' : 'info'](
+              { seq: n, status: dv.status, why: dv.why.slice(0, 300) },
+              '[orchestrating-loop] #205 判据方向性探针',
+            );
+          } catch (err) {
+            // fail-open 吞异常**不吞证据** (§静默坑 2)。
+            ledger.criterionDirection = 'inconclusive';
+            logger.warn({ seq: n, err: String(err) }, '[orchestrating-loop] #205 方向性探针抛错 → inconclusive (不拦)');
+          }
+        }
       }
       if (ledger) {
         ledger.ok++;

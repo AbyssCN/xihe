@@ -682,6 +682,8 @@ export interface ReadoutResult {
       calls: number; perRun: number | null; firstFail: number; reinjected: number;
       recheck: { pass: number; unproven: number; fail: number; error: number; skipped: number; unknown: number };
     };
+    /** #205 判据方向性 (1-A 文件放回改动前的代码里跑): greenBefore = 判据量的不是本次目标。 */
+    direction: { redBefore: number; greenBefore: number; inconclusive: number; absent: number };
     /**
      * 回灌蒸发 = reinjected ∧ afterReinject 'green' ∧ 回灌后零新派发 (dispatches.length === dispatchesBeforeReinject)。
      * 分母 = reinjected 的父 run (设计 §5 的公式); 回灌了但没记 dispatchesBeforeReinject 的老记录 → unknown 单列, 两边都不进。
@@ -1394,6 +1396,7 @@ function emptyLoopReadout(): ReadoutResult['loop_readout'] {
     parents: 0, childRows: 0, width: [], depth: [], widthStats: null, depthStats: null,
     speedup: { ratios: [], median: null, unmeasurable: 0 },
     verifier: { calls: 0, perRun: null, firstFail: 0, reinjected: 0, recheck: { pass: 0, unproven: 0, fail: 0, error: 0, skipped: 0, unknown: 0 } },
+    direction: { redBefore: 0, greenBefore: 0, inconclusive: 0, absent: 0 },
     evaporation: { numerator: 0, denominator: 0, rate: null, unknown: 0 },
     cards: { calls: 0, ok: 0, rejectedSchema: 0, help: 0, rejectedCompile: 0, childRunError: 0, firstPassRate: null, byCard: {}, readOnlyShellBlocked: 0 },
     dispatches: { total: 0, perRun: null, briefTrue: 0, briefFalse: 0, briefNull: 0, briefReproRate: null },
@@ -1455,6 +1458,11 @@ function computeLoopReadout(parsed: ParsedRow[]): ReadoutResult['loop_readout'] 
     if (loop.verifier.firstVerdict === 'fail') out.verifier.firstFail++;
     // 老记录没有 recheck 字段 → 'unknown', **不并进 'skipped'**: 「这条 run 跑在窄复审上线前」
     // 与「跑了但没触发复审」是两件事 (§静默坑 1)。
+    // #205 方向性探针 (2026-09-04): 'green-before' = 判据在改动前就绿 ⇒ 它量的不是本次目标。
+    // 'inconclusive' 与缺席分开数 —— 跑了没量到 ≠ 压根没跑 (§静默坑 1)。
+    const cd = loop.criterionDirection;
+    if (cd === undefined) out.direction.absent++;
+    else out.direction[cd === 'red-before' ? 'redBefore' : cd === 'green-before' ? 'greenBefore' : 'inconclusive']++;
     const rc = loop.verifier.recheck;
     if (rc === undefined) out.verifier.recheck.unknown++;
     else out.verifier.recheck[rc]++;
@@ -2613,6 +2621,7 @@ function printNewSegments(r: ReadoutResult, dbPath: string): void {
     console.log(`   加速比: 中位 ${f2(lp.speedup.median)} (Σ子节点墙钟 / conductor 墙钟; 判词 > 1) · ${lp.speedup.unmeasurable} 个 run 因 durationMs 缺席不可算`);
     console.log(`   终审: 调用 ${lp.verifier.calls} (${f2(lp.verifier.perRun)}/run, 判词 ≤ 2) · 首判红 ${lp.verifier.firstFail} · 回灌 ${lp.verifier.reinjected}`);
     // 'unproven' 单列: 它是「放行但这次什么都没量到」, 并进 pass 会把闸的有效触发率读虚高。
+    console.log(`   #205 判据方向性: 改动前红(量对了) ${lp.direction.redBefore} · **改动前就绿(量的不是本次目标)** ${lp.direction.greenBefore} · 没量到 ${lp.direction.inconclusive} · 没跑 ${lp.direction.absent}`);
     console.log(`   D-14 窄复审: 确认修好 ${lp.verifier.recheck.pass} · 未能确认(放行) ${lp.verifier.recheck.unproven} · 拿到反证判没修 ${lp.verifier.recheck.fail} · 判官调不通 ${lp.verifier.recheck.error} · 没触发 ${lp.verifier.recheck.skipped} · 上线前老记录 ${lp.verifier.recheck.unknown}`);
     console.log(`   回灌蒸发率: ${lp.evaporation.numerator}/${lp.evaporation.denominator} = ${pct(lp.evaporation.rate)} (回灌后零新派发且 oracle 绿; 老记录没分界线 ${lp.evaporation.unknown} 个不进分母)`);
     console.log(`   工具首次直达率: ${lp.cards.ok}/${lp.cards.calls} = ${pct(lp.cards.firstPassRate)} · zod 拒 ${lp.cards.rejectedSchema} · help ${lp.cards.help} · 编译拒 ${lp.cards.rejectedCompile} · 子 run 抛错 ${lp.cards.childRunError} · 只读 bash 拒 ${lp.cards.readOnlyShellBlocked} · 按卡 ${Object.entries(lp.cards.byCard).map(([k, v]) => `${k}×${v}`).join(' ') || '—'}`);
