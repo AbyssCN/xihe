@@ -2962,6 +2962,8 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
         ...(survey ? { criterionSurvey: { ...survey.facts, ...(survey.why ? { why: survey.why } : {}) } } : {}),
         // 三候选共识读数 (2026-09-05 D-5): 同一条理由挂在 loop 上。缺席 = 没开共识 (开关默认关), 不是一致性为 0。
         ...(classified.criterionConsensus ? { criterionConsensus: classified.criterionConsensus } : {}),
+        // W1 勘察包读数 (2026-09-06): 装配期写在 ConductorCardLedger 上, 这里提到 loop (同款分层)。缺席 = 没装配编排循环。
+        ...(loopLedger.surveyPack ? { surveyPack: loopLedger.surveyPack } : {}),
         // W3 runner 就绪预检 (2026-09-06): 同一条理由挂在 loop 上。恒写 —— 预检在这条路上一定跑过,
         // 「不适用」由 `runner: null` 表达, 不用缺席表达 (§静默坑 1)。
         runnerReady,

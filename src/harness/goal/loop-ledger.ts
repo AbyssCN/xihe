@@ -284,9 +284,8 @@ export interface LoopLedger {
    *
    * 挂在这里的理由同上面几格: 只有 `r.loop` 整份 JSON 出得了 bench 容器。
    * ⚠ 三态见 {@link SurveyPackFacts}。
-   * ⚠ **本格今天到不了这里**: 运行期那份写在 `ConductorCardLedger.surveyPack` 上, 而
-   * `LoopLedger` 由 `run-goal.ts` 逐字段组装 —— 那一跳 (`surveyPack: loopLedger.surveyPack`)
-   * 属于本契约写集之外的文件, 未接。读数今天从 `ConductorCardLedger` / 日志读。
+   * 运行期那份写在 `ConductorCardLedger.surveyPack` 上, `run-goal.ts` 组装 loop 时提上来
+   * (2026-09-06 合并时接的那一跳: `surveyPack: loopLedger.surveyPack`)。
    */
   surveyPack?: SurveyPackFacts;
   /**
