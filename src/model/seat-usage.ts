@@ -120,6 +120,10 @@ const TRACE_SEAT_RULES: readonly [RegExp, string][] = [
   [/^map-lister:/, 'leaf'], // engine.ts:2257 → config.leafModel
   [/^fanin-summary:/, 'leaf'], // engine.ts:3186 → faninCfg.model ?? config.leafModel(显式覆盖时会错归, model 列可查)
   [/^verifier$/, 'verifier'], // verifier.ts:302 → opts.verifierModel(verifier 座)
+  // 证伪测试那一发 (2026-09-05, goal/run-goal.ts 的 D-7 段): 坐的是同一个 verifier 座
+  // (resolveRoleModel('verifier')), 所以座位归 verifier; **标签另起**是为了在 byTrace 上
+  // 数得出「证伪这一步烧了多少」—— 并进 'verifier' 桶就再也分不开 (与 escalation 分标签同一课)。
+  [/^verifier-falsify$/, 'verifier'],
   [/^review:spec$/, 'review-spec'], // review/run.ts:250 → specModel ⚠ 必须排在 /^review:/ 前面
   [/^review:/, 'review'], // review/run.ts:264 维度召回 + verify.ts:60/148 证伪两发, 都吃 review 座
   // engine.ts settle() 的节点级行。**只有 agent 一种** —— 别的 kind 都经网关, 已有发级行,

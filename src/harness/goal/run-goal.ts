@@ -101,7 +101,20 @@ import {
   renderCriterionFreezeTruth,
 } from './orchestrating-loop';
 import type { AcceptanceProbe } from './acceptance-gate';
-import { countExistingTestsTouched, createConductorCardLedger, withDispatchEvidence, type ConductorCardLedger, type LoopLedger } from './loop-ledger';
+import { countExistingTestsTouched, createConductorCardLedger, withDispatchEvidence, type ConductorCardLedger, type FalsifyLedger, type LoopLedger } from './loop-ledger';
+import { probeEnvFacts } from '../env-facts';
+import { renderDiffEvidence } from '../diff-evidence';
+import {
+  FALSIFY_PLAN_SCHEMA,
+  buildFalsifyPrompt,
+  pickRunner,
+  renderFalsifyFinding,
+  runFalsifyTests,
+  validateFalsifyPlan,
+  type FalsifyPlan,
+  type SpawnLike,
+} from './falsify-tests';
+import { resolveRoleModel, send } from '../../model/gateway';
 import { surveyForCriterion, type CriterionSurvey } from './criterion-survey';
 import { conductorCtxOf, withLoopConfig, type LoopHost } from './loop-run';
 
@@ -247,6 +260,10 @@ export interface RunGoalConfig {
    * 靠 `plan.name` (`goal-contract` / `goal-execute`) 分辨是谁在调。
    */
   _runDag?: (plan: ConductorPlan, config: RunGoalConfig['dag']) => Promise<ExecutorDagResult>;
+  /** D-7 证伪测试座位的注入口 (测试用); 缺省真 `send` 走 `resolveRoleModel('verifier')` 那个异族座。 */
+  _falsifySeat?: typeof send;
+  /** D-7 证伪测试 runner 的注入口 (测试用); 缺省 `Bun.spawnSync` (见 `./falsify-tests`)。 */
+  _falsifyRun?: SpawnLike;
   /**
    * D-2 (SDD cairness-distill 2026-08-10): 写集对账的可注入面。写集 = plan 节点可选 `write_set`
    * 字段 (conductor-plan.ts); 本钩子在 execute 段跑完后把跑后 git diff 逐文件走归属阶梯
@@ -1824,8 +1841,70 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   let greenSnapshot: { round: number; files: { path: string; content: string }[] } | undefined;
   /** INV-7 读数: 这一趟真调 verifier 的次数 (闸红短路 / verifier-error 不经这里, 它们不是一次判卷)。 */
   let verifierCalls = 0;
+  // ── D-1 / D-7 证伪测试 (`OMD_VERIFIER_FALSIFY=1` 才开, 默认关) ────────────────────
+  //
+  // 终审换了家族, 但**没换证据来源**: 它判的仍是我们自己写的那条判据。这一步让一个没看过
+  // 我们判据的异族座, 只读「原指令 + 勘察段 + 盘上 diff」写 ≤3 条可跑的测试, 由引擎机械跑 ——
+  // 判词变成退出码, 相当于对「隐藏测试会查什么」做第二次独立采样 (D-2 刻意不给判据命令与判据文件:
+  // 给了就等于让第二次采样复用第一次的盲点)。
+  //
+  // **位置** = 终审 `inner` 之前 (D-1「环收敛后、终审之前」): 引擎只在图跑完那一刻调终审,
+  // 所以进到 tap 里就已经是环收敛之后了。**红不直接判死** —— 走 D-14 回灌一轮 (下方)。
+  // 开关关着 ⇒ 整段一次都不执行, 卷面与 ledger 逐字节同旧 (INV-4)。
+  let falsify: FalsifyLedger | undefined;
+  /** 首跑那份计划与 runner —— 回灌后要重跑**同一组** (换一组等于换了把尺子, 前后不可比)。 */
+  let falsifyPlan: FalsifyPlan | undefined;
+  let falsifyRunner: string | undefined;
+  /** 首跑判红时的 finding 正文 (挂掉的测试全文 + 输出尾); 缺席 = 没红。 */
+  let falsifyFinding: string | undefined;
+  const falsifyOn = process.env.OMD_VERIFIER_FALSIFY === '1';
+  /** 一个 inconclusive 读数 —— 「什么都没量到」的四种成因共用这一格, 靠 `why` 分辨 (§静默坑 1)。 */
+  const falsifyNothingMeasured = (written: number, why: string): FalsifyLedger => ({ written, ran: 0, status: 'inconclusive', failing: [], reinjected: false, why });
+  const runFalsifyRound = async (): Promise<void> => {
+    try {
+      // D-1: 没有可跑 runner 就不花那一发座位钱 —— 写出来也跑不了。
+      const candidates = probeEnvFacts(config.cwd).testCommandCandidates;
+      if (candidates.length === 0) {
+        falsify = falsifyNothingMeasured(0, '跑不起来: 这个仓探不出任何验收命令候选 (probeEnvFacts.testCommandCandidates 为空)');
+        return;
+      }
+      // 盘上改动 = 引擎自己跑 git 取的事实, 不是执行体自述 (与终审卷面同一个来源)。
+      const diffText = renderDiffEvidence(config.cwd).text;
+      const r = await (config._falsifySeat ?? send)({
+        model: resolveRoleModel('verifier'),
+        // 与终审同族同座, 但**另记一格**: 并进 'verifier' 桶就答不出「证伪这一步烧了多少」。
+        meta: { role: 'verifier-falsify' },
+        messages: [{ role: 'user', content: buildFalsifyPrompt({ task, ...(survey?.text ? { survey: survey.text } : {}), ...(diffText ? { diff: diffText } : {}) }) }],
+        maxTokens: 8192,
+        responseSchema: FALSIFY_PLAN_SCHEMA,
+      });
+      const validated = validateFalsifyPlan(r.parsed);
+      if ('error' in validated) {
+        falsify = falsifyNothingMeasured(0, `写不出: ${validated.error}`);
+        return;
+      }
+      const runner = pickRunner(candidates, validated);
+      if (runner === undefined) {
+        falsify = falsifyNothingMeasured(validated.tests.length, `跑不起来: 候选 [${candidates.join(' · ')}] 里没有跑得了这份计划的 runner`);
+        return;
+      }
+      const res = runFalsifyTests(validated, config.cwd, runner, config._falsifyRun ? { run: config._falsifyRun } : {});
+      falsifyPlan = validated;
+      falsifyRunner = runner;
+      falsify = { written: validated.tests.length, ran: res.ran, status: res.status, failing: res.failing, reinjected: false, ...(res.why ? { why: res.why } : {}) };
+      if (res.status === 'red') falsifyFinding = renderFalsifyFinding(validated, res, runner);
+      logger.warn({ status: res.status, ran: res.ran, failing: res.failing, why: res.why }, '[run-goal] D-7 证伪测试跑完 (红只回灌一轮, 不直接判死)');
+    } catch (err) {
+      // fail-open: 这一步坏了不许改终态 —— 但原文既进 why 也进日志 (仓规静默坑 2)。
+      falsify = falsifyNothingMeasured(0, `跑不起来: 证伪那一步抛错 ${String(err).slice(0, 240)}`);
+      logger.warn({ err: String(err) }, '[run-goal] D-7 证伪那一步抛错 → inconclusive (fail-open, 终态不变)');
+    }
+  };
+
   const tapVerifier = (inner: VerifierFn): VerifierFn => async (req) => {
     verifierCalls++;
+    // D-1: 证伪跑在终审之前, 每 run 至多一轮 (`falsify` 已在场 = 这趟跑过了)。
+    if (falsifyOn && loopPlan !== undefined && falsify === undefined) await runFalsifyRound();
     // 1-A: 判据文件冻结的引擎记录随卷 (D-5 按调用真值): 判卷时刻重算 hash 对照冻结值, 判卷官据此不再把
     // 「测试文件是本 run 写的」读成 target=criterion。没冻过 → 不注入, 卷面同旧。
     const freezeTruth = loopLedger.criterionFreeze ? renderCriterionFreezeTruth(loopLedger.criterionFreeze, config.cwd) : null;
@@ -1934,11 +2013,18 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   if (criterionVeto) {
     logger.warn({ reason: lastVerdict!.reason.slice(0, 200) }, '[run-goal] 1-B: 终审否决判据 (target=criterion) → 不回灌 conductor, 走 INV-4 判据重建');
   }
-  if (loopPlan !== undefined && lastVerdict !== undefined && !lastVerdict.pass && conductorInfraFailure === undefined && !criterionVeto) {
-    const finding = lastVerdict.reason;
+  /** 终审**真判红**过 —— 与「回灌过」分开: D-5 之后回灌还有第二个触发源 (证伪判红), 两者的下游处置不同。 */
+  const verifierVetoed = lastVerdict !== undefined && !lastVerdict.pass;
+  /** D-5: 证伪判红同样开一轮回灌。开关关着时 `falsify` 恒缺席 ⇒ 恒 false (INV-4)。 */
+  const falsifyRed = falsify?.status === 'red';
+  if (loopPlan !== undefined && (verifierVetoed || falsifyRed) && conductorInfraFailure === undefined && !criterionVeto) {
+    // 两个触发源都在场时 finding 合并 —— 少带一半会让 conductor 只修看得见的那一半。
+    const finding = [verifierVetoed ? lastVerdict!.reason : undefined, falsifyRed ? falsifyFinding : undefined]
+      .filter((x): x is string => x !== undefined && x !== '')
+      .join('\n\n---\n\n');
     logger.warn(
-      { chars: finding.length, target: lastVerdict.target },
-      '[run-goal] D-14 终审判红 → finding 回灌 conductor 节点重派 1 次 (第二次不带 verifier, INV-7)',
+      { chars: finding.length, target: lastVerdict?.target, verifierVetoed, falsifyRed },
+      '[run-goal] D-14 终审判红 / D-5 证伪判红 → finding 回灌 conductor 节点重派 1 次 (第二次不带 verifier, INV-7)',
     );
     const replanted = withReinjectedFinding(loopPlan, finding);
     try {
@@ -1955,6 +2041,13 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
     } catch (err) {
       return bail(`D-14 回灌重跑抛错: ${String(err).slice(0, 200)}`, 'infra-error');
     }
+  }
+  // D-5: 回灌后重跑**同一组**证伪测试 (不重写 —— 换一组等于换了把尺子, 前后两次就不可比)。
+  // 仍红 ⇒ 下方 `verifierRejected` 判死; 转绿 / inconclusive ⇒ 终态不变。
+  if (reinjected && falsifyRed && falsify !== undefined && falsifyPlan !== undefined && falsifyRunner !== undefined) {
+    const again = runFalsifyTests(falsifyPlan, config.cwd, falsifyRunner, config._falsifyRun ? { run: config._falsifyRun } : {});
+    falsify = { ...falsify, reinjected: true, afterReinject: again.status };
+    logger.warn({ afterReinject: again.status, failing: again.failing, why: again.why }, '[run-goal] D-5 回灌后重跑同一组证伪测试');
   }
   const flatUsed = flatPlan !== undefined;
   const loopUsed = loopPlan !== undefined;
@@ -2449,7 +2542,9 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   // 「verifier-error 不触发回灌」同向)。
   let recheck: 'pass' | 'unproven' | 'fail' | 'error' | 'skipped' = 'skipped';
   const recheckOracleWouldPass = runnable ? oracleOk : false;
-  if (reinjected && recheckOracleWouldPass && config.dag.verifier && reinjectedPlan && reinjectFinding !== undefined) {
+  // `verifierVetoed` 是 D-5 之后加的守卫: 复审问的是「**首判** finding 修没修」, 终审压根没判红时
+  // 没有首判 finding 可复审。D-5 之前 `reinjected` 蕴含 `verifierVetoed`, 所以这一项对老行为是恒真。
+  if (reinjected && verifierVetoed && recheckOracleWouldPass && config.dag.verifier && reinjectedPlan && reinjectFinding !== undefined) {
     try {
       verifierCalls++;
       const verdict = await config.dag.verifier({
@@ -2480,8 +2575,12 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   // P3 S6b / D-14: 回灌过 ∧ (回灌后机械 oracle 仍红 ∨ 本 run 无机械 oracle) ⇒ 终审的否决没被证伪, 这趟不算成。
   // 2026-09-04 追加第三条: 回灌后 oracle 绿**但窄复审判首判 finding 仍没修** ⇒ 同样不算成。
   // `recheck === 'error'` 不在此列 —— 判官坏了按 oracle 念 (fail-open), 那是 'skipped' 之外单记一格的理由。
+  // 2026-09-05 D-5 追加第四条: 证伪测试回灌后**仍红** ⇒ 同样不算成 (target = implementation:
+  // 打的是产出不是判据, 所以不触发判据重建)。
+  // 第一支加的 `verifierVetoed` 同样是 D-5 之后的守卫 —— 证伪触发的回灌不该拿「终审的否决没被证伪」
+  // 这句话去判死; D-5 之前 `reinjected` 蕴含它, 对老行为恒真。
   const verifierRejected =
-    loopUsed && ((reinjected && (runnable ? !oracleOk : true)) || criterionVeto || recheck === 'fail');
+    loopUsed && ((reinjected && verifierVetoed && (runnable ? !oracleOk : true)) || criterionVeto || recheck === 'fail' || falsify?.afterReinject === 'red');
   // conductor 死于基建 (2026-09-03): 哪怕 accept 复用了一份绿, 这趟也不算成 —— 引擎侧停 (infra-error), 不是交付达标。
   const convergedByCriteria = loopOk && oracleOk && !verifierRejected && conductorInfraFailure === undefined;
   // ── D-1 零写入闸 (契约 2026-09-05 假 success 三闸) ────────────────────────────────
@@ -2645,6 +2744,10 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
             ? `终审否决判据 (target=criterion, 1-B): 不回灌 conductor, 走 INV-4 判据重建 (见 ${CRITERION_REBUILD_LABEL}); 被否决的判据上 oracle 绿不算证据, 本 run 不算成`
             : recheck === 'fail'
               ? `终审判红, finding 回灌 conductor 1 次后机械判据转绿, 但**窄复审判首判 finding 仍没修** (D-14; oracle 绿不算数, 读 recheckDissent, **别加轮数**)`
+              // D-5: 终审没判红、只有证伪判红的那一格 —— 措辞不能照抄「终审判红」, 下一步要看的是
+              // `loop.falsify.failing` 那几条测试, 不是终审判词。
+              : !verifierVetoed
+                ? `证伪测试判红, finding 回灌 conductor 1 次后**仍红** (D-5; 挂掉的测试见 loop.falsify.failing, **别加轮数**)`
               : `终审判红, finding 回灌 conductor 1 次后${runnable ? '机械判据仍红' : '无机械判据可证明修复'} (D-14; 读 verifierDissent, **别加轮数**)`)
         : outcome === 'oracle-failed' ? '环说成了但冻结判据(环外)没过 (D-I: 以判据为准)'
         // 两条路都落 delivered-with-red, 摘要必须说清是哪一条 —— 混着念就是在编现场:
@@ -2729,6 +2832,8 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
             },
           },
         ),
+        // D-6 证伪读数: 同样只有挂在 loop 上才出得了 bench 容器。缺席 = 开关没开, 不是「跑了没查出来」。
+        ...(falsify ? { falsify } : {}),
         cards: {
           calls: loopLedger.calls,
           ok: loopLedger.ok,

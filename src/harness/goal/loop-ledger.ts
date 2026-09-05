@@ -141,6 +141,29 @@ export function createConductorCardLedger(): ConductorCardLedger {
   return { calls: 0, ok: 0, rejectedSchema: 0, help: 0, rejectedCompile: 0, childRunError: 0, byCard: {}, readOnlyShellBlocked: 0, dispatches: [], residentPromptChars: null };
 }
 
+/**
+ * 证伪测试一趟的读数 (契约 `docs/plan/2026-09-05-verifier写证伪测试-执行契约-草案.md` D-6)。
+ *
+ * 三态别压平 (§静默坑 1): `red` = 至少一条挂; `green` = 全过 (这一趟什么都没查出来);
+ * `inconclusive` = **什么都没量到** (座位写不出 / 计划没过闸 / 没有能跑它的 runner / 超时 /
+ * collection error) —— 成因原文在 `why`, 预注册要的正是它的占比与分布。
+ *
+ * `written` = 过闸后的测试条数 (座位写了但没过闸 ⇒ 0); `ran` = 真交给 runner 的条数
+ * (`written > 0` 而 `ran === 0` = 计划合法但这仓跑不了它)。
+ * `afterReinject` 缺席 = 没回灌 (首跑不红, 或红了但回灌被别的守卫拦住)。
+ */
+export interface FalsifyLedger {
+  written: number;
+  ran: number;
+  status: 'red' | 'green' | 'inconclusive';
+  /** 首跑挂掉的测试文件名 (回灌后那一跑的结果只落在 `afterReinject` —— finding 的正文来自首跑)。 */
+  failing: string[];
+  reinjected: boolean;
+  afterReinject?: 'red' | 'green' | 'inconclusive';
+  /** inconclusive 的成因原文。缺席 = 没有额外要说的 (green / red 的常态)。 */
+  why?: string;
+}
+
 /** 写进账本的最终形状。 */
 export interface LoopLedger {
   path: 'orchestrating-loop';
@@ -213,6 +236,14 @@ export interface LoopLedger {
    * (账本 `dag-runs.db` 那条路更早就不通: 库在 omd home, `omd-state.tgz` 只扫 `<cwd>/.omd`。)
    */
   acceptanceProbe?: AcceptanceProbe;
+  /**
+   * 异族座写的证伪测试读数 (2026-09-05 D-6, 见 `./falsify-tests`)。
+   *
+   * 挂这里的理由同上面 `acceptanceProbe`: 只有 `r.loop` 整份 JSON 出得了 bench 容器。
+   * ⚠ 整格缺席 = **开关没开** (`OMD_VERIFIER_FALSIFY` 不是 `1` / 走的不是编排循环 / 没配终审座),
+   * **不是**「跑了什么都没查出来」—— 后者是 `status: 'green'` (§静默坑 1)。
+   */
+  falsify?: FalsifyLedger;
   /**
    * 分类前机械勘察的读数 (2026-09-05, 见 `./criterion-survey`)。
    *

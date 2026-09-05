@@ -74,6 +74,9 @@ const NOISE_PROVIDERS: ReadonlySet<string> = new Set([
   'channel', 'rule', 'off', 'grill', 'canary', 'addTicket', 'setSecrets', 'contract',
   'urn', 'W2', 'fixture', 'research', 'file', 'HH', 'SYS', 'package.json', 'conductor',
   'suggest', 'confirmSuggestion', 'syncFromMap',
+  // pytest 的插件开关值 `-p no:<plugin>` (2026-09-05, goal/falsify-tests.ts 的
+  // `no:cacheprovider`) —— 是 pytest 的命名空间, 不是模型 provider。
+  'no',
   // autoresearch 夜链挖题矿源的 CandidateItem.id 命名空间 `<source>:<stable-key>`
   // (2026-09-02, docs/plan/2026-09-02-夜间自迭代链-执行契约.md 冻结接口) —— 非模型坐标。
   'sessions', 'readout',
