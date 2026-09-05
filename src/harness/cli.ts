@@ -5,12 +5,14 @@
  *   omd mcp     # stdio MCP server (**主入口**: Claude Code 等 MCP 客户端 spawn 它)
  *   omd init    # 首次配置向导 (纯 readline, 写 .env)
  *
- * ## 为什么这个文件只剩 60 行 (2026-08-01, 交接文 13)
+ * ## 切片 6 (2026-09-05) — registry 接线
  *
- * 此前它是**交互式 TUI 前端**: 包 `pi-coding-agent` 的 `main()`, 挂 21 个 `*-extension.ts`
- * (banner/theme/hashline/memory/mcp-router/code/cost/verify-gate/…)。owner 裁决 **omd 收成纯 MCP** ——
- * 对话前端归 Claude Code, omd 只当执行引擎。于是 TUI 外壳与它独占的能力件一起出局,
- * 只留 `pi-agent-core` (agent leaf 的 runAgentLoop) + `pi-ai` (provider 注册)。
+ * 注册表驱动的命令 (`status` / `map add` / `doctor` / `call` 等 36 + 1 条) 走
+ * `dispatchCli()` 单点编排: 装配 → 找 handler → 调 → 渲染 → 退出码。
+ * 既有子命令 (`mcp` / `tui` / `serve` / `init` / `touch` / `touches` / `gc` / `pack`
+ * / `config dump` / `config verify-seats` / `plan --dry-run` / `run --fixture` /
+ * `solve`) 行为与退出码一字不变,`findCommand` 对含 `--fixture` 的 run 与对 `solve`
+ * 返回 undefined,让旧路接管。
  *
  * ⚠ `init` 分支不能删: 没有它, 用户配置 omd 的唯一办法是手改 JSON/.env。
  *   `init/` 是纯 readline 向导, **不依赖 pi-coding-agent** (已核)。
@@ -23,15 +25,48 @@
  * 叫 `tui.ts` 却删光了 TUI 的文件 —— 本轮改名 `cli.ts`, 同目录, 相对 import 一个没动。
  */
 import '../env-alias';
+import { randomUUID } from 'node:crypto';
 import { setCoreLogger } from './logger';
 import { logger, setLoggerDestination } from '../logger';
+import {
+  CLI_COMMANDS,
+  findCommand,
+  parseGenericArgs,
+  renderUsage,
+  type CliCommand,
+} from './cli/registry';
+import { invokeTool, type InvokeToolEntry } from './cli/invoke';
+import { defaultSolveSpawn, solveWorkerScriptPath, type SolveSpawn, type SolveSpawnHandle } from './cli-solve';
+import {
+  collectDoctorInput,
+  diagnose,
+  renderDoctor,
+} from './hooks/doctor';
 
 // 核心引擎 logger 接缝: 把宿主 pino 注入 pi-agent-core 的 console-shell (INV-X3, 结构化日志)。
 setCoreLogger(logger);
 
 const userArgs = process.argv.slice(2);
 
-const USAGE = `omd —— DAG 执行引擎 (纯 MCP + web 控制面 + S1 静态闸)
+/** 切片 6: dispatchCli 返回值 —— 不在内部 process.exit,把出口给 cli.ts 主进程。 */
+export interface DispatchResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+/** 切片 6: dispatchCli 注入面 —— 测试密封 Bun.spawn / lazy 装配 / 真起 bwrap。 */
+export interface DispatchDeps {
+  /** registry-driven 命令走 invokeTool 时的替身 tools(测试用 fixture,生产省略)。 */
+  tools?: readonly InvokeToolEntry[];
+  /** run --detached 的 spawn 替身。 */
+  runSpawn?: SolveSpawn;
+  /** doctor 的 input 收集替身。 */
+  collectDoctorInput?: typeof collectDoctorInput;
+}
+
+/** USAGE 头: 既有手写段保留在前(GWT-5 / INV-5 既有子命令零变化)。 */
+const USAGE_HEAD = `omd —— DAG 执行引擎 (纯 MCP + web 控制面 + S1 静态闸)
 
   omd tui     交互式 conductor 前端 (自建 TUI)
   omd mcp     stdio MCP server (给 Claude Code 等 MCP 客户端 spawn)
@@ -46,10 +81,225 @@ const USAGE = `omd —— DAG 执行引擎 (纯 MCP + web 控制面 + S1 静态�
   omd solve "<goal>" [flags]   headless autonomous run (bench/CI 入口面, E1a);spawn scripts/goal-worker.ts 后台跑,退出码按 resultOut 首部 outcome 机械映射 (delivered=0, 其它=2, 缺失=3)
   omd pack add <本地目录|git URL> | remove <name> | list   数据插件包 (agents/playbooks/skills; 装包过质量闸, 账在 .omd/packs.json)
 
-终端对话前端: 原 pi TUI 2026-08-01 撤除, 2026-08-07 以自建 TUI 回归。
+`;
+
+/** USAGE 尾: 与原文件一致的"裸 omd 不直接进 TUI"声明。 */
+const USAGE_TAIL = `终端对话前端: 原 pi TUI 2026-08-01 撤除, 2026-08-07 以自建 TUI 回归。
 
 裸 omd 打印本用法, 不直接进 TUI。
 `;
+
+/** USAGE = 既有手写段 + registry 表生成的命名命令段。SDD 切片 6 D-1/USAGE-by-table。 */
+const USAGE = `${USAGE_HEAD}${renderUsage(CLI_COMMANDS)}\n\n${USAGE_TAIL}`;
+
+// ─── 切片 6 dispatchCli ───────────────────────────────────────────────────────
+//
+// 编排函数 = 「registry 优先 → legacy 落空」。返 null = 不归 dispatch 管,
+// cli.ts 主进程接着走 mcp/tui/serve/... 既有分支。
+//
+// 三条铁律:
+//   · 内部不 process.exit —— 把出口码返回,由 cli.ts 主进程透传。
+//   · 内部不动 process.argv / process.stdout / process.stderr —— 也不读。
+//     测试要注入 IO 必须通过 deps。
+//
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 切片 6 GWT-5 / GWT-7 / GWT-8 / D-2 / D-6 单点编排。
+ *
+ * 1. `--help` / `-h` / `help` / 空 → USAGE + exit 0
+ * 2. 未知命令 → USAGE 走 stderr + exit 1 (错误路径不污染 stdout)
+ * 3. `findCommand` 命中 → 走对应路径(invoke / doctor / call / run --detached)
+ * 4. 不命中 → 返回 null(legacy 接管:mcp/tui/serve/init/touch/runs gc/...
+ *    /config dump/config verify-seats/plan --dry-run/run --fixture/solve/pack)
+ *
+ * @returns `DispatchResult` = 命中的出口;`null` = 未命中,让 cli.ts 走 legacy。
+ */
+export async function dispatchCli(
+  args: string[],
+  deps: DispatchDeps = {},
+): Promise<DispatchResult | null> {
+  if (args.length === 0) return { exitCode: 0, stdout: USAGE, stderr: '' };
+  if (args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
+    return { exitCode: 0, stdout: USAGE, stderr: '' };
+  }
+
+  const matched = findCommand(args);
+  if (matched) {
+    return await dispatchMatched(matched.cmd, matched.rest, deps);
+  }
+
+  // 未命中 (含未知命令与 `solve` / `run --fixture` 等保留给 legacy 的路径) →
+  // 返回 null,让 cli.ts 主进程走 legacy else (未知 → stderr USAGE + exit 1)。
+  // findCommand 已对 solve 与 run --fixture 返 undefined,见 registry.ts:194。
+  return null;
+}
+
+/** findCommand 命中后的分派:doctor / call / run --detached 各自一条专用路,余下走 invokeTool。 */
+async function dispatchMatched(
+  cmd: CliCommand,
+  rest: string[],
+  deps: DispatchDeps,
+): Promise<DispatchResult> {
+  const head = cmd.path[0];
+  if (head === 'doctor') return dispatchDoctor(rest, deps);
+  if (head === 'call') return dispatchCall(rest, deps);
+  if (head === 'run' && rest.includes('--detached')) {
+    return dispatchRunDetached(cmd, rest, deps);
+  }
+  return dispatchInvoke(cmd, rest, deps);
+}
+
+/** GWT-4 / INV-3 / INV-4:命名命令 → invokeTool。
+ *  `--json` 是 CLI 出口信号(控 stdout = JSON 还是人读),不进 handler。 */
+async function dispatchInvoke(
+  cmd: CliCommand,
+  rest: string[],
+  deps: DispatchDeps,
+): Promise<DispatchResult> {
+  const json = rest.includes('--json');
+  const restNoJson = rest.filter((a) => a !== '--json');
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = cmd.argv(restNoJson);
+  } catch (e) {
+    return {
+      exitCode: 1,
+      stdout: '',
+      stderr: `omd ${cmd.path.join(' ')}: ${(e as Error).message}\n`,
+    };
+  }
+  if (!cmd.tool) {
+    return {
+      exitCode: 1,
+      stdout: '',
+      stderr: `omd ${cmd.path.join(' ')}: 命令未注册 tool (与 registry 漂移?)\n`,
+    };
+  }
+  const result = await invokeTool({
+    tool: cmd.tool,
+    args: parsed,
+    json,
+    ...(deps.tools ? { tools: deps.tools } : {}),
+  });
+  return { exitCode: result.exitCode, stdout: result.stdout, stderr: '' };
+}
+
+/** D-2:`omd call <tool> [--json "<obj>"] | [--key value …]` 通用逃生口。
+ *  第一个位置参是 tool 名,余项走 `parseGenericArgs`(--json 整体 / --key value)。 */
+async function dispatchCall(
+  rest: string[],
+  deps: DispatchDeps,
+): Promise<DispatchResult> {
+  const toolName = rest[0];
+  if (!toolName || toolName.startsWith('--')) {
+    return {
+      exitCode: 1,
+      stdout: '',
+      stderr: `omd call: 用法: omd call <tool> [--json "<obj>"] | [--key value ...]\n`,
+    };
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = parseGenericArgs(rest.slice(1));
+  } catch (e) {
+    return { exitCode: 1, stdout: '', stderr: `omd call: ${(e as Error).message}\n` };
+  }
+  const json = rest.slice(1).includes('--json');
+  const result = await invokeTool({
+    tool: toolName,
+    args: parsed,
+    json,
+    ...(deps.tools ? { tools: deps.tools } : {}),
+  });
+  return { exitCode: result.exitCode, stdout: result.stdout, stderr: '' };
+}
+
+/** GWT-7:`omd doctor [repo]` —— collectDoctorInput → diagnose → renderDoctor。
+ *  repo 缺省 = process.cwd();test 注入 collectDoctorInput 不真起 bwrap。 */
+async function dispatchDoctor(
+  rest: string[],
+  deps: DispatchDeps,
+): Promise<DispatchResult> {
+  const repoRoot =
+    rest[0] && !rest[0].startsWith('--') ? rest[0] : process.cwd();
+  const collect = deps.collectDoctorInput ?? collectDoctorInput;
+  const input = await collect(repoRoot);
+  const problems = diagnose(input);
+  const { text, exitCode } = renderDoctor(problems);
+  return { exitCode, stdout: text, stderr: '' };
+}
+
+/** D-6:`omd run <task> --detached` —— spawn worker(`--tool run --args-json '<...>'`)。
+ *  spawn cmd 与 cli-solve 的 detached 路径同形态(`--run-id` 由 worker 自产 / stdio ignore / unref);
+ *  worker 拿到 args-json 就调同名 `run` handler,handler 走引擎 fire-and-forget,worker 等终态。
+ *  `--detached` 与 `--run-id` 是 CLI 编排信号,不进 args-json(单一路,与 cli-solve 同款)。 */
+async function dispatchRunDetached(
+  cmd: CliCommand,
+  rest: string[],
+  deps: DispatchDeps,
+): Promise<DispatchResult> {
+  const restNoDetached = rest.filter((a) => a !== '--detached');
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = cmd.argv(restNoDetached);
+  } catch (e) {
+    return {
+      exitCode: 1,
+      stdout: '',
+      stderr: `omd run: ${(e as Error).message}\n`,
+    };
+  }
+  const cwd = typeof parsed.cwd === 'string' ? parsed.cwd : process.cwd();
+  // --run-id 是 worker 自身产物 (randomUUID),不二次塞进 args-json;`detached` 同理。
+  delete parsed.runId;
+  delete parsed.detached;
+  const runId = randomUUID();
+  const spawn = deps.runSpawn ?? defaultSolveSpawn;
+  const workerCmd = [
+    'bun',
+    'run',
+    solveWorkerScriptPath(),
+    '--run-id', runId,
+    '--cwd', cwd,
+    // GWT-6: 显式带 --tool (worker 默认 dag_goal,但 spawn 那行明写以便 grep/审计)。
+    // 与 cli-solve 的 detached 路径同款 —— 一致性是双 spawn 不漂的底线。
+    '--tool', 'run',
+    '--args-json', JSON.stringify(parsed),
+  ];
+  let handle: SolveSpawnHandle;
+  try {
+    handle = spawn(workerCmd, {
+      cwd,
+      stdio: ['ignore', 'ignore', 'ignore'],
+      detached: true,
+    });
+  } catch (e) {
+    return {
+      exitCode: 1,
+      stdout: '',
+      stderr: `omd run (--detached) spawn failed: ${(e as Error).message}\n`,
+    };
+  }
+  handle.unref?.();
+  return { exitCode: 0, stdout: `runId: ${runId}\n`, stderr: '' };
+}
+
+// ─── 切片 6 主流程 ────────────────────────────────────────────────────────────
+//
+// 顺序:dispatchCli 优先 → 命中返 DispatchResult → 写 stdout/stderr + process.exit;
+// 未命中(null)走 legacy 分支。
+//
+// ⚠ import.meta.main 守护: 测试 (dispatch.test.ts) import 本模块只取 dispatchCli,
+// 跑 import 时这段不执行; 只有 `bun src/harness/cli.ts` 真作为入口时跑。
+// ──────────────────────────────────────────────────────────────────────────────
+if (import.meta.main) {
+  const dispatchResult = await dispatchCli(userArgs);
+  if (dispatchResult !== null) {
+    if (dispatchResult.stdout) process.stdout.write(dispatchResult.stdout);
+    if (dispatchResult.stderr) process.stderr.write(dispatchResult.stderr);
+    process.exit(dispatchResult.exitCode);
+  }
 
 // omd mcp: stdio MCP server 入口 (D-1) —— 零 UI, 不进 wizard。
 // stdout 是 MCP 协议通道: pino 默认写 stdout 会腐蚀协议帧 → 日志改道 stderr (warn 级, 引擎尸检可见)。
@@ -905,4 +1155,6 @@ async function runWithFixture(args: string[]): Promise<void> {
 async function getScrubber(): Promise<(env: NodeJS.ProcessEnv) => Record<string, string | undefined>> {
   const mod = await import('./command-leaf');
   return (env) => mod.scrubCredentialEnv(env as Record<string, string | undefined>);
+}
+// 闭合 import.meta.main 守护 (切片 6: 测试 import 不触发 legacy 分支)
 }

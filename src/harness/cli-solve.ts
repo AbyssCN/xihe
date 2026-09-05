@@ -28,6 +28,19 @@
  *
  * 全程零 stdin 依赖 / 零 TTY 探测分支 / 零 `process.stdin.isTTY` 分叉。worker 输出经
  * stdio=inherit 直通 stdout/stderr (bench 的 tee 在外面接)。
+ *
+ * ## 切片 2 detached (D-6, 2026-09-05)
+ *
+ * `--detached`: 母进程 spawn worker 后立即退 0,与 MCP `detached:true` 同语义。
+ * spawn 时 stdio 三件套 `ignore` + `unref()` —— 母进程不死带 worker。
+ * 日志与 resultOut 由 worker 自落,CLI 不读不写 (D-6: 与 MCP detach 一致)。
+ *
+ * ## 切片 2 GWT-6b (2026-09-05, 实测修两路不一致)
+ *
+ * worker 主流程对 `dag_goal` 强制 `--goal` 必填;但 cli-solve 的 USAGE 写「goal 与 --sdd
+ * 至少其一」。当调用方只给 `--sdd`,本片读 SDD 首部标题作为 `--goal` 补齐,让 worker 不再以
+ * 「--run-id 与 --goal 必填」退出 3。**职责在 cli-solve**:worker 的强制保留(它没 SDD 上下文,
+ * 不该去读)。
  */
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -41,7 +54,8 @@ export function solveWorkerScriptPath(): string {
   return join(import.meta.dir, '..', '..', 'scripts', 'goal-worker.ts');
 }
 
-/** CLI v1 最小集 (D-3) —— 位置参 <goal> 或 --sdd 二选一至少其一;其它全可选。 */
+/** CLI v1 最小集 (D-3) —— 位置参 <goal> 或 --sdd 二选一至少其一;其它全可选。
+ *  切片 2 新增 detached。 */
 export interface ParsedSolveArgs {
   /** 第一个非 flag 位置参 (D-3)。 */
   goal?: string;
@@ -65,6 +79,12 @@ export interface ParsedSolveArgs {
    * 2026-08-10 那次同形)。词表与 worker / `solve` MCP 一致; 别的值 (如 `worktree`) 响亮拒。
    */
   branchStrategy?: 'branch' | 'head';
+  /**
+   * 切片 2: `--detached` —— 与 MCP `detached:true` 同语义。
+   * 母进程 spawn worker 后立即退 0,不读 resultOut,不走 D-4 退出码映射。
+   * (CLI 自己也要拒 `--detached --wait` 组合:wait 对 detached 无意义。)
+   */
+  detached?: boolean;
   /** usage 错误信息;在场 → INV-4 响亮退出,零 spawn。 */
   usageError?: string;
 }
@@ -81,6 +101,11 @@ function intFlag(args: string[], name: string): number | undefined {
   if (v === undefined) return undefined;
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/** `--detached` 是布尔 flag (无值);在场 → true。 */
+function boolFlag(args: string[], name: string): boolean {
+  return args.includes(name);
 }
 
 /** 把"被某个 flag 占用为值的 arg 索引"收集起来,排除掉再做位置参。 */
@@ -106,6 +131,7 @@ export function parseSolveArgs(args: string[], defaultCwd = process.cwd()): Pars
   const tier = tierRaw === 'simple' || tierRaw === 'complex' ? tierRaw : undefined;
   const branchRaw = flagValue(args, '--branch-strategy');
   const branchStrategy = branchRaw === 'branch' || branchRaw === 'head' ? branchRaw : undefined;
+  const detached = boolFlag(args, '--detached');
 
   if (!goal && !sdd) {
     return {
@@ -121,6 +147,7 @@ export function parseSolveArgs(args: string[], defaultCwd = process.cwd()): Pars
       ...(sdd ? { sdd } : {}),
       cwd,
       resultOut,
+      ...(detached ? { detached } : {}),
       usageError: `--tier 必须是 simple 或 complex,收到: ${tierRaw}`,
     };
   }
@@ -130,6 +157,7 @@ export function parseSolveArgs(args: string[], defaultCwd = process.cwd()): Pars
       ...(sdd ? { sdd } : {}),
       cwd,
       resultOut,
+      ...(detached ? { detached } : {}),
       usageError: `--branch-strategy 必须是 branch 或 head,收到: ${branchRaw}`,
     };
   }
@@ -143,33 +171,45 @@ export function parseSolveArgs(args: string[], defaultCwd = process.cwd()): Pars
     ...(intFlag(args, '--budget-tokens') !== undefined ? { budgetTokens: intFlag(args, '--budget-tokens')! } : {}),
     ...(tier ? { tier } : {}),
     ...(branchStrategy ? { branchStrategy } : {}),
+    ...(detached ? { detached } : {}),
   };
 }
 
-/** spawn 注入面 —— 与 `goal.ts:113` 的 `spawnDetached` 同款 (测试密封,永不起真进程)。 */
+/** spawn 注入面 —— 与 `goal.ts:113` 的 `spawnDetached` 同款 (测试密封,永不起真进程)。
+ *  切片 2: detached 路径走另一组 stdio (ignore + unref),所以扩展 spawn 面带 stdio 字段。 */
 export interface SolveSpawnHandle {
   /** 进程退出码 (null = 被信号带走,Bun.spawn 原样)。 */
   exited: Promise<number | null>;
+  /** 切片 2: 在 detached 路径上由编排函数调用,模拟 worker 进程的 unref。
+   *  默认 spawn (Bun.spawn) 上也是 no-op (Bun.spawn 不暴露 unref 同款接口时测试方便)。 */
+  unref?: () => void;
+  /** 切片 2: 测试可见的 pid (默认 spawn 拿 Bun 真实 pid;fake 自己定)。 */
+  pid?: number;
 }
 export interface SolveSpawnOpts {
   cwd: string;
   env?: NodeJS.ProcessEnv;
-  /** 必须三件套 inherit —— bench 的 tee 在外面,D-5 零 TTY 探测。 */
-  stdio: ['inherit', 'inherit', 'inherit'];
+  /** 非 detached:三件套 inherit (D-5 零 TTY 探测);detached:三件套 ignore (母进程不等、不接管 IO)。 */
+  stdio: ['inherit', 'inherit', 'inherit'] | ['ignore', 'ignore', 'ignore'];
+  /** 切片 2: 是否 detached (= stdio ignore + 调用后 unref)。默认 false。 */
+  detached?: boolean;
 }
 export type SolveSpawn = (cmd: string[], opts: SolveSpawnOpts) => SolveSpawnHandle;
 
-/** 默认 spawn = Bun.spawn,非 detached,stdio 全 inherit,await exited。
- *  编排函数 await 这个 handle.exited,worker 输出经 inherit 直通父进程 stdout/stderr。 */
+/** 默认 spawn = Bun.spawn。非 detached 三件套 inherit;detached 三件套 ignore + unref。 */
 export function defaultSolveSpawn(cmd: string[], opts: SolveSpawnOpts): SolveSpawnHandle {
   const proc = Bun.spawn(cmd, {
     cwd: opts.cwd,
     env: opts.env,
-    stdin: 'inherit',
-    stdout: 'inherit',
-    stderr: 'inherit',
+    stdin: opts.stdio[0],
+    stdout: opts.stdio[1],
+    stderr: opts.stdio[2],
+    // 切片 2 (D-6): `detached: true` 才让子进程自成会话/进程组 ——
+    // 否则 stdio=ignore + unref 的进程组信号会把它连坐杀掉(实测过)。
+    ...(opts.detached ? { detached: true } : {}),
   });
-  return { exited: proc.exited as Promise<number | null> };
+  if (opts.detached) proc.unref();
+  return { exited: proc.exited as Promise<number | null>, unref: () => proc.unref(), pid: proc.pid };
 }
 
 /** 从 resultOut 读 outcome kind (首行 `outcome: <kind>`)。缺失或无 outcome 行 → undefined。 */
@@ -186,6 +226,28 @@ export function readOutcomeKind(resultOutPath: string): string | undefined {
   const firstLine = text.split('\n', 1)[0] ?? '';
   const m = firstLine.match(/^outcome:\s*(\S+)/);
   return m?.[1];
+}
+
+/**
+ * 切片 2 GWT-6b 修两路不一致:从 SDD 文件首部抽一标题,补作 --goal 的值。
+ *
+ * 纯文本:`#` 开头的首行视为标题;取 `#` 与首段空白之后、末尾空白之前的文本。
+ * 文件读不出 / 无标题行 → 返回 undefined (由调用方决定是否响亮退出)。
+ */
+export function deriveGoalFromSdd(sddPath: string): string | undefined {
+  let text: string;
+  try {
+    text = readFileSync(sddPath, 'utf8');
+  } catch (e) {
+    // 吞异常不许吞证据:文件读不到 → 一行 stderr,调用方按 usageError 退。
+    process.stderr.write(`[omd solve] --sdd 文件读取失败 (${sddPath}): ${(e as Error).message}\n`);
+    return undefined;
+  }
+  for (const line of text.split('\n')) {
+    const m = line.match(/^#\s+(.+?)\s*$/);
+    if (m) return m[1]!;
+  }
+  return undefined;
 }
 
 /** orchestration 入参面 (测试注入替身)。 */
@@ -210,6 +272,55 @@ export async function runSolveCLI(args: string[], deps: SolveCliDeps = {}): Prom
     return 1;
   }
 
+  // ── 切片 2 GWT-6b: --sdd 单独在场 → 取 SDD 首部标题作 goal(worker 强制 goal 必填) ──
+  let goalForSpawn = parsed.goal;
+  if (!goalForSpawn && parsed.sdd) {
+    const derived = deriveGoalFromSdd(parsed.sdd);
+    if (!derived) {
+      process.stderr.write(`omd solve: --sdd 未含可读的 '# …' 标题 (${parsed.sdd});显式给 goal 或修正 SDD 顶行。\n`);
+      process.stderr.write(USAGE);
+      return 1;
+    }
+    goalForSpawn = derived;
+  }
+
+  // ── 切片 2 detached 路径:spawn 后立即退 0,不读 resultOut ──────────────
+  if (parsed.detached) {
+    const runId = randomUUID();
+    const spawn = deps.spawn ?? defaultSolveSpawn;
+    const cmd = [
+      'bun',
+      'run',
+      solveWorkerScriptPath(),
+      '--run-id', runId,
+      '--cwd', parsed.cwd,
+      // GWT-6: 显式带 --tool (worker 默认也是 dag_goal, 但 spawn 那行明写以便 grep/审计
+      // 直接抓到; 若哪天 worker 默认改,这条 spawn 不变仍走得通)。
+      '--tool', 'dag_goal',
+      '--goal', goalForSpawn!,
+      ...(parsed.tier ? ['--tier', parsed.tier] : []),
+      ...(parsed.maxRounds !== undefined ? ['--max-rounds', String(parsed.maxRounds)] : []),
+      ...(parsed.budgetTokens !== undefined ? ['--budget-tokens', String(parsed.budgetTokens)] : []),
+      ...(parsed.budgetMinutes !== undefined ? ['--budget-minutes', String(parsed.budgetMinutes)] : []),
+      '--result-out', parsed.resultOut,
+      ...(parsed.sdd ? ['--sdd-path', parsed.sdd] : []),
+      ...(parsed.branchStrategy ? ['--branch-strategy', parsed.branchStrategy] : []),
+    ];
+    let handle: SolveSpawnHandle;
+    try {
+      handle = spawn(cmd, { cwd: parsed.cwd, stdio: ['ignore', 'ignore', 'ignore'], detached: true });
+    } catch (e) {
+      process.stderr.write(`omd solve (--detached) spawn 失败: ${(e as Error).message}\n`);
+      return 1;
+    }
+    // detached 的副作用在 spawn 那一刻就定了 (worker 自己写 .omd/),CLI 不建 resultOut 父目录
+    // —— worker 端 dag_goal handler 会 mkdirSync。但若 worker 在 mkdirSync 之前死,CLI 也不管。
+    handle.unref?.();
+    // stdout(不放日志;日志走 stderr)— 与 MCP `detached:true` 同语义
+    process.stdout.write(`runId: ${runId}\n`);
+    return 0;
+  }
+
   // resultOut 目录建好 (worker 不替你建;goal.ts:1136 mkdirSync 在 handler 内,新写穿前要父目录在)
   try {
     mkdirSync(dirname(parsed.resultOut), { recursive: true });
@@ -226,7 +337,7 @@ export async function runSolveCLI(args: string[], deps: SolveCliDeps = {}): Prom
     solveWorkerScriptPath(),
     '--run-id', runId,
     '--cwd', parsed.cwd,
-    ...(parsed.goal ? ['--goal', parsed.goal] : []),
+    '--goal', goalForSpawn!,
     ...(parsed.tier ? ['--tier', parsed.tier] : []),
     ...(parsed.maxRounds !== undefined ? ['--max-rounds', String(parsed.maxRounds)] : []),
     ...(parsed.budgetTokens !== undefined ? ['--budget-tokens', String(parsed.budgetTokens)] : []),
@@ -270,6 +381,6 @@ export async function runSolveCLI(args: string[], deps: SolveCliDeps = {}): Prom
 /** USAGE 一行 (cli.ts 内 USAGE 多行的 +1)。刻意保持薄,与 cli.ts 现有 USAGE 风格一致。 */
 export const USAGE = `  omd solve "<goal>" [--sdd <path>] [--cwd <dir>] [--result-out <path>]
                  [--max-rounds N] [--budget-minutes N] [--budget-tokens N] [--tier simple|complex]
-                 [--branch-strategy branch|head]
+                 [--branch-strategy branch|head] [--detached]
                  headless autonomous run (bench/CI 入口面);<goal> 与 --sdd 至少其一必填
 `;
