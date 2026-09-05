@@ -620,6 +620,52 @@ export function shouldFireProduceBy(s: {
   return s.filesTouchedCount === 0 && s.nowMs - s.startedAtMs > PRODUCE_BY_WALL_MS;
 }
 
+// ── W4 勘察步预算 (2026-09-06, 契约 `docs/plan/2026-09-06-墙钟与读次数-执行契约.md`) ─────
+//
+// 与 produce-by 正交的**第三根轴**: produce-by 数墙钟 (勘探久了还没写), 这条数**步**
+// (读了 N 步还没派活), 且只对**持卡的节点** (conductor) 生效。
+//
+// 为什么要它: code80-boundary 80 题实测 conductor 均 24.8 个工具步, 66% 是 bash、bash 里
+// 61% 是只读勘察, 真正派活的只有 1 到 3 步。引擎已经把仓内事实机械算好塞进它的面 (W1 勘察包),
+// 但拦不住它再读一遍。
+//
+// **这是边界不是做法**: 只注一次、**不拒任何调用** —— 读什么、怎么读、要不要接着读, 仍然全由
+// 模型定 (§引擎理念 ②)。它只是把「勘察包已经给过你」这件事在它读到第 N 步时说一次。
+
+/** 连续只读步数到这个数就提醒一次。`OMD_SURVEY_STEPS` 可改 (见 {@link surveyBudgetSteps})。 */
+export const SURVEY_STEPS_BEFORE_DISPATCH = 10;
+
+/**
+ * 算进"只读勘察步"的工具名 —— conductor 那副只读手 (D-20: read / ls / grep / bash) 加单文件读。
+ * 不在这张表里的一步 (七张派工卡 / write / edit) 把连读计数**清零**: 判据是「**连续**读了 N 步」。
+ */
+export const SURVEY_READONLY_TOOLS: ReadonlySet<string> = new Set(['read', 'ls', 'grep', 'bash', 'hashline_read']);
+
+/** 阈值解析: 正整数才认, 其余 (含 0 / 负数 / 非数字 / 缺席) 一律默认 —— 关掉要显式改代码, 不靠一个歧义值。 */
+export function surveyBudgetSteps(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.OMD_SURVEY_STEPS);
+  return Number.isInteger(raw) && raw > 0 ? raw : SURVEY_STEPS_BEFORE_DISPATCH;
+}
+
+/** 提醒文案 (pi 通道经 pendingGrindAdvice 缓冲下发; SDK 通道同 grind 边界只记不注)。 */
+export const surveyBudgetInstruction = (steps: number): string =>
+  `[survey-budget] 勘察包已给你, 你又读了 ${steps} 步还没派活。现在派 work(), ` +
+  `或用一句话写明还缺哪一条事实再读。`;
+
+/**
+ * 勘察步预算纯谓词 (可测缝, 同 shouldFireProduceBy 纪律)。五条件与: 持卡节点 ∧ 连读 ≥ 阈值 ∧
+ * 一次都没派活 ∧ 一个文件都没写过 ∧ 尚未提醒过。不持卡 (work 子节点) 恒 false —— 它该读多久读多久。
+ *
+ * 阈值走第二参而不是读全局: 谓词保持纯的, 环境变量由调用方解析一次 ({@link surveyBudgetSteps})。
+ */
+export function surveyBudgetHit(
+  s: { hasCards: boolean; readonlySteps: number; dispatches: number; filesTouchedCount: number; fired: boolean },
+  steps: number = surveyBudgetSteps(),
+): boolean {
+  if (!s.hasCards || s.fired) return false;
+  return s.readonlySteps >= steps && s.dispatches === 0 && s.filesTouchedCount === 0;
+}
+
 /**
  * grind advisor 的唯一 system prompt —— 与 advisor-tool 的 ADVISOR_SYSTEM_PROMPT 分家:
  * 那条吃 transcript, 这条只吃状态摘要 (grind 判据本身已是确定性结论, advisor 只需诊断 + 下一步)。
@@ -2263,6 +2309,30 @@ export function createAgentLeafRunner(opts: AgentLeafRunnerOpts = {}): AgentLeaf
         } else if (FILE_READ_TOOLS.has(e.toolName)) {
           if (typeof args.path === 'string' && args.path.trim()) readByCall.set(e.toolCallId, args.path);
         }
+        // W4 勘察步预算 (2026-09-06): 只对**持卡节点** (customTools 非空 = conductor) 生效。
+        // 连读到预算还没派活 → 经 pendingGrindAdvice 注入一次派活提醒; **不拒任何调用**, 只注一次。
+        // 缓冲被 wrapup/advisor 占着时不抢 (高档语义优先, 同 produce-by 那条)。
+        if (SURVEY_READONLY_TOOLS.has(e.toolName)) readonlySurveySteps++;
+        else readonlySurveySteps = 0;
+        if (
+          surveyBudgetHit(
+            {
+              hasCards: (face?.customTools?.length ?? 0) > 0,
+              readonlySteps: readonlySurveySteps,
+              dispatches: face?.progress ? face.progress() : 0,
+              filesTouchedCount: touched.size,
+              fired: surveyNudgeFiredAtStep !== null,
+            },
+            surveyStepBudget,
+          )
+        ) {
+          surveyNudgeFiredAtStep = readonlySurveySteps;
+          if (!pendingGrindAdvice) pendingGrindAdvice = surveyBudgetInstruction(readonlySurveySteps);
+          logger.warn(
+            { cwd, steps: readonlySurveySteps, budget: surveyStepBudget, toolCalls },
+            '[agent-leaf] W4 勘察步预算命中 → 注入一次派活提醒 (不拒调用, 整个节点只注一次)',
+          );
+        }
         shell.note(e);
       } else if (e.type === 'tool_execution_end') {
         pendingTools = Math.max(0, pendingTools - 1);
@@ -2374,6 +2444,11 @@ export function createAgentLeafRunner(opts: AgentLeafRunnerOpts = {}): AgentLeaf
     let pendingGrindAdvice: string | undefined;
     // #178 produce-by 状态: null = 没触发 (量过且没发生, 恒写口径同 advisorFiredAt); 至多 1 次。
     let produceByFiredAt: number | null = null;
+    // W4 勘察步预算状态 (2026-09-06): 连续只读步数 (非只读工具清零) + 提醒过没有 (null = 没提醒, 至多 1 次)。
+    // 阈值解析一次 —— 谓词保持纯的, 不在事件流里反复读环境变量。
+    let readonlySurveySteps = 0;
+    let surveyNudgeFiredAtStep: number | null = null;
+    const surveyStepBudget = surveyBudgetSteps();
     // S1 spin-route 档 1 (2026-08-25, 片 2): 命中空转口径 → 注入一次证据包
     // (D-1: 每叶至多一次; D-2/3: 四件套叠加 + 具名判据; D-5: 入账 additive 数组)。
     //
