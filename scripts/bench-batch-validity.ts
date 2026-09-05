@@ -25,7 +25,11 @@ const MARKERS = {
   /** 分类调用没回来或解析不了 → 全保守档 (complex + 探索型)。 */
   classify: ['分类调用/解析失败', '分类调用或解析失败', '验收分型未成立'],
   sessionLimit: ['session limit'],
-  http502: ['502'],
+  /**
+   * 裸 `'502'` 会命中日志时间戳 (`[15:44:54.502]`) —— code80-boundary 实测 5/80 题全是这种假阳性。
+   * 前面不许是数字 / 点 / 冒号, 后面不许是数字: `pi: 502:` 与 `HTTP 502 Bad Gateway` 仍命中。
+   */
+  http502: [/(?<![\d.:])502(?!\d)/],
   acceptance: ['验收分型未成立'],
 } as const;
 
@@ -46,7 +50,8 @@ export interface BatchValidity {
  * 裁决只看 `classifyFailed`: 它是「这批题的判据轴到底成没成立」的那一列。
  */
 export function countBatchFailures(files: readonly { name: string; text: string }[]): BatchValidity {
-  const hit = (text: string, pats: readonly string[]): boolean => pats.some((p) => text.includes(p));
+  const hit = (text: string, pats: readonly (string | RegExp)[]): boolean =>
+    pats.some((p) => (typeof p === 'string' ? text.includes(p) : p.test(text)));
   let classifyFailed = 0;
   let sessionLimit = 0;
   let http502 = 0;

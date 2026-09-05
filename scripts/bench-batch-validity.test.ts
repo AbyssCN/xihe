@@ -54,6 +54,16 @@ describe('countBatchFailures — INV-7', () => {
     expect(r.acceptanceNotEstablished).toBe(1);
   });
 
+  test('502 不认时间戳: `[15:44:54.502]` 不算, `pi: 502:` 与 `HTTP 502` 算 (code80-boundary 实测 5/80 假阳性; 把 http502 改回裸 "502" 则本用例红)', () => {
+    const r = countBatchFailures([
+      file('ts1', '[15:44:54.502] INFO: [acceptance-run] 冻结判据跑完'),
+      file('ts2', '[16:50:38.502] INFO: recovered'),
+      file('real1', 'ModelError: pi: 502: {"message":"bridge upstream"}'),
+      file('real2', 'HTTP 502 Bad Gateway'),
+    ]);
+    expect(r.http502).toBe(2);
+  });
+
   test('「验收分型未成立」也算分类失败 (它是同一次失败的另一句话)', () => {
     const r = countBatchFailures([
       ...Array.from({ length: 30 }, (_, i) => file(`x${i}`, '(验收分型未成立: 无分类器 (缺 generate/model))')),
