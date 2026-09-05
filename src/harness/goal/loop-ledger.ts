@@ -19,6 +19,7 @@ export type ConductorCardName = 'work' | 'spawn' | 'map' | 'explore' | 'best_of'
 
 import type { AcceptanceProbe } from './acceptance-gate';
 import type { CriterionSurveyFacts } from './criterion-survey';
+import type { CriterionConsensus } from './criterion-consensus';
 
 export interface LoopDispatch {
   seq: number;
@@ -253,6 +254,14 @@ export interface LoopLedger {
    * 两者别并掉 (§静默坑 1)。`why` 在场 = 有段失败或撞墙钟, 原文在里面。
    */
   criterionSurvey?: CriterionSurveyFacts & { why?: string };
+  /**
+   * 判据三候选共识的一致性读数 (2026-09-05, 见 `./criterion-consensus`)。
+   *
+   * 挂这里的理由同上面两格: 只有 `r.loop` 整份 JSON 出得了 bench 容器。
+   * ⚠ 整格缺席 = **没开共识** (`OMD_CRITERION_CONSENSUS` 不是 `1` / 注入式分类器 / 闸 C 复用上次分类
+   * / 三发全挂回落了单发那条路), **不是**「开了但一致性为 0」—— 后者是 `agreement: 0` (§静默坑 1)。
+   */
+  criterionConsensus?: CriterionConsensus;
 
   cards: Omit<ConductorCardLedger, 'dispatches' | 'residentPromptChars' | 'criterionFreeze' | 'criterionDirection'>;
   dispatches: LoopDispatch[];

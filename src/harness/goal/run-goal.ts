@@ -2813,6 +2813,8 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
         ...(classified.acceptanceProbe ? { acceptanceProbe: classified.acceptanceProbe } : {}),
         // 勘察读数 (D-4): 同样只有挂在 loop 上才出得了 bench 容器。缺席 = 没跑勘察, 不是全 0。
         ...(survey ? { criterionSurvey: { ...survey.facts, ...(survey.why ? { why: survey.why } : {}) } } : {}),
+        // 三候选共识读数 (2026-09-05 D-5): 同一条理由挂在 loop 上。缺席 = 没开共识 (开关默认关), 不是一致性为 0。
+        ...(classified.criterionConsensus ? { criterionConsensus: classified.criterionConsensus } : {}),
         // #205 第三刀: 执行体改了几个仓库自带的测试文件 (环外信号, 只记账不拦)。
         // `git cat-file -e HEAD:<path>` 判「改动前存在」; 非 git 仓 / git 调不通 → null, 不是 0。
         existingTestsTouched: countExistingTestsTouched(

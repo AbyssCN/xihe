@@ -42,6 +42,15 @@ import {
   probeVacuity,
 } from './acceptance-gate';
 import { freezeRubric, type RubricItem, type RubricSpec } from './rubric-spec';
+import {
+  agreement,
+  chooseCandidate,
+  directionSignature,
+  surveyHits,
+  type CriterionConsensus,
+} from './criterion-consensus';
+import { tryResolveSeatModel } from '../../model/role-models';
+import { effectiveSeatSampling } from '../../model/seat-overrides';
 
 /** D-5 轻重路由 (成本轴): simple = 直接 Execute→Verify; complex = 全 research→spec→execute。 */
 export type GoalTier = 'simple' | 'complex';
@@ -99,6 +108,11 @@ export interface GoalClassification {
   route?: RouteDecision;
   /** R-1 (2026-09-03): 这次分类打了几发 LLM (含 P2b 重推 / E-T1b 追问)。null = 没走 LLM (缺 generate); 缺席 = 注入式分类器 / 老对象。 */
   llmCalls?: number | null;
+  /**
+   * 三候选共识读数 (2026-09-05, 见 `./criterion-consensus`)。**缺席 = 没开共识**
+   * (`OMD_CRITERION_CONSENSUS` 不是 `1`, 或三发全挂回落了单发那条路), 不是"开了但一致性为 0"。
+   */
+  criterionConsensus?: CriterionConsensus;
 }
 
 /**
@@ -287,6 +301,62 @@ function probeRepo(root: string): ProbeResult {
     }
   }
   return { markers, allowlist: allowlistForRoot(root), hasPython, hasJs };
+}
+
+/**
+ * 三候选共识的开关 (D-6)。**只认字面 `1`** —— 半开的开关 (`true` / `yes` / `0`) 会长成又一个
+ * 说不清自己在不在的旋钮; 默认关是因为它要先当单变量臂量一批读数, 不是先上生产。
+ */
+function consensusEnabled(): boolean {
+  return process.env.OMD_CRITERION_CONSENSUS?.trim() === '1';
+}
+
+/** 坐标的 provider 前缀 (`claude-code:` / `openai-codex:` / `minimax-cn:` …)。同 provider 视为同族。 */
+function providerOf(coord: string): string {
+  return coord.split(':')[0] ?? coord;
+}
+
+/**
+ * 异族座 (D-1): 先取 `verifier` 座; 与 conductor 同 provider 就退 `escalation` 座;
+ * 两个都同族 ⇒ **没有异族候选** —— 那时只采两份并记 `crossFamily=false`, 不拿同族凑第三份。
+ * (同族自审复用同一个盲点, 凑出来的第三票是一张假票。)
+ */
+function crossFamilyModel(coord: string): string | undefined {
+  const family = providerOf(coord);
+  for (const seat of ['verifier', 'escalation'] as const) {
+    const m = tryResolveSeatModel(seat)?.model.trim();
+    if (m && providerOf(m) !== family) return m;
+  }
+  return undefined;
+}
+
+/**
+ * `git ls-files` 的输出集 —— 方向签名里「指向既有文件」那一格的真源 (D-2)。
+ * 非 git 仓 / git 调不通 / 没给仓根 ⇒ 空集 (于是那一格一律 false), 且**留一行原文**:
+ * 「仓里真没有这个文件」与「我没查成」是两件事 (仓规静默坑 1/2)。
+ */
+function trackedFiles(root: string | undefined): ReadonlySet<string> {
+  if (!root) return new Set();
+  try {
+    const r = Bun.spawnSync(['git', 'ls-files'], { cwd: root, stdout: 'pipe', stderr: 'pipe', timeout: 5_000 });
+    if (r.exitCode !== 0) {
+      logger.info(
+        { root, exitCode: r.exitCode, err: r.stderr.toString().slice(0, 200) },
+        '[omd/goal] 共识: git ls-files 非零退出 → 「指向既有文件」这一格一律 false',
+      );
+      return new Set();
+    }
+    return new Set(
+      r.stdout
+        .toString()
+        .split('\n')
+        .map((s) => s.trim())
+        .filter((s) => s !== ''),
+    );
+  } catch (err) {
+    logger.info({ root, err: String(err) }, '[omd/goal] 共识: git ls-files 起不来 → 「指向既有文件」这一格一律 false');
+    return new Set();
+  }
 }
 
 /** 分类 prompt。白名单**拼进 prompt** —— 承 conductor prompt 的同一条教训: 不给表就只能猜, 猜错即假红。 */
@@ -564,9 +634,10 @@ async function classifyGoalCore(
       : undefined;
   const blockOpts: AcceptanceCommandBlockOpts = repoRoot ? { root: repoRoot, ...(envFacts ? { envFacts } : {}) } : {};
 
-  const ask = async (correction: string): Promise<GoalClassification> => {
+  // `seat` 只在三候选共识那条路上给 (D-1 的异族座那一发); 省略 = conductor 座, 与共识关闭时逐字相同。
+  const ask = async (correction: string, seat?: string): Promise<GoalClassification> => {
     const { text } = await generate({
-      model,
+      model: seat ?? model,
       // 判据轴是防作弊的地基, 它那一发尤其该看得见 (D-I / G4 两条闸都压在这个 prompt 上)。
       traceName: 'classify:acceptance',
       messages: [{ role: 'user', content: `${classifyPrompt(goal, probe)}${correction}` }],
@@ -656,9 +727,62 @@ async function classifyGoalCore(
     return { ...c, acceptanceProbe: probe };
   };
 
+  /**
+   * 三候选共识 (D-1..D-5): 同一份 prompt 采 n 份 → 抽方向签名 → 量一致性 → 按 D-4 择一。
+   * **只量, 不拦不升级** —— 歧义在本版只进账本 (`ambiguous`), 不改任何一条控制流。
+   * 一份都没拿到 ⇒ `undefined`, 调用方回落共识关闭时的单发那条路 (失败语义原样不变)。
+   */
+  const sampleConsensus = async (): Promise<{ chosen: GoalClassification; ledger: CriterionConsensus } | undefined> => {
+    // D-1 的温度那一句今天发不出去: `GenerateFn` 这个接缝没有采样通道, 而 conductor 座的采样意图
+    // (`model/seats.ts`) 恰好是空的 —— 两发同参, 发散来自 provider 自己的默认温度。
+    // 座位真配了温度而这里发不出去时留一行: 一个到不了调用上的旋钮该出声, 不该静默消失。
+    const sampling = effectiveSeatSampling('conductor');
+    if (sampling.temperature !== undefined || sampling.topP !== undefined) {
+      logger.info({ sampling }, '[omd/goal] 共识: conductor 座采样意图发不出去 (GenerateFn 无采样通道) → 两发同参');
+    }
+    const cross = crossFamilyModel(model);
+    const seats = [model, model, ...(cross ? [cross] : [])];
+    // 并发采 —— 三发之间没有依赖, 串起来只是把分类那一站的墙钟乘三。
+    const settled = await Promise.allSettled(seats.map((m) => ask('', m)));
+    const got: GoalClassification[] = [];
+    settled.forEach((s, i) => {
+      if (s.status === 'fulfilled') got.push(s.value);
+      // 缺席 ≠ 空, 且**不重试** (D-1): 少一份候选照常比, 但原文要留下 (仓规静默坑 2)。
+      else logger.warn({ seat: seats[i], err: String(s.reason) }, '[omd/goal] 共识候选缺席 (不重试)');
+    });
+    if (got.length === 0) {
+      logger.warn({ seats: seats.length }, '[omd/goal] 共识候选全挂 → 回落单发分类那条路');
+      return undefined;
+    }
+    const existing = trackedFiles(repoRoot);
+    const cands = got.map((c) => {
+      const sig = directionSignature(c.acceptance, existing);
+      return { spec: c.acceptance, sig, surveyHits: surveyHits(sig, survey ?? '') };
+    });
+    const a = agreement(cands.map((c) => c.sig));
+    const pick = chooseCandidate(cands);
+    const ledger: CriterionConsensus = {
+      n: cands.length,
+      crossFamily: cross !== undefined,
+      kindAgreement: a.kindAgreement,
+      agreement: a.agreement,
+      ambiguous: pick.ambiguous,
+      chosenIndex: pick.index,
+      kinds: cands.map((c) => c.sig.kind),
+    };
+    logger.info({ ...ledger, why: pick.why }, '[omd/goal] 判据三候选共识 (本版只量, 不拦不升级)');
+    return { chosen: got[pick.index]!, ledger };
+  };
+
+  /** 这次分类的共识读数; 共识没开 / 全挂时恒缺席。下面每条返回路径都经 {@link finish} 挂上它。 */
+  let consensus: CriterionConsensus | undefined;
+  const finish = (c: GoalClassification): GoalClassification => (consensus ? { ...c, criterionConsensus: consensus } : c);
 
   try {
-    const first = await ask('');
+    // 共识关闭时这两行逐字等价于原来的 `const first = await ask('')` —— 零多余调用、prompt 零变化 (INV-4)。
+    const sampled = consensusEnabled() ? await sampleConsensus() : undefined;
+    consensus = sampled?.ledger;
+    const first = sampled?.chosen ?? (await ask(''));
     // 重试只有两种情况: ① "想判执行型却因命令跑不起来被降级" (闸拒, 原因串是唯一凭据);
     // ② E-T1b (2026-08-26): **marker 仓老实选探索型** —— bench 批 9 实证散文偏置扳不动分类器
     // (探索型 5/10, 其均值 0.124 vs 执行型 0.457), 按仓规做成机械追问: 有测试基建的仓选探索型
@@ -676,16 +800,16 @@ async function classifyGoalCore(
         : [];
       if (evidence.length > 0) {
         logger.info({ evidence }, '[omd/goal] 有测试基建的仓首判探索型 → 机械追问一次 (E-T1b: 自证或改判)');
-        return vet(
+        return finish(await vet(
           await ask(
             `\n\n⚠ 复核: 这个仓实测有测试基建 (${evidence.join(', ')}) —— 改代码的目标几乎总能用` +
               '「一条会红的测试变绿」来判。请二选一:\n' +
               '  a) 改判 "executable": 在测试套里找锚 (相邻测试文件 / 新建最小测试), 给出可跑 command;\n' +
               '  b) 坚持 "exploratory": 但 learning_goal 首句必须写明**为什么这个仓的测试套锚不住这次改动**。',
           ),
-        );
+        ));
       }
-      return vet(first);
+      return finish(await vet(first));
     }
     logger.info({ blockedReason }, '[omd/goal] 验收命令被闸拒 → 带上闸的原话重问一次 (D-I)');
     let second = await ask(
@@ -705,15 +829,15 @@ async function classifyGoalCore(
       second = { ...second, acceptanceProbe: { kind: 'demoted', why: stillBlocked } };
 
     }
-    return vet(second);
+    return finish(await vet(second));
 
   } catch (err) {
     logger.warn({ err: String(err) }, '[omd/goal] 分类调用/解析失败 → 全保守档 (complex + 探索型)');
-    return {
+    return finish({
       tier: 'complex',
       acceptance: fallbackExploratory('分类调用或解析失败'),
       acceptanceProbe: { kind: 'skipped', why: String(err) },
-    };
+    });
   }
 }
 
