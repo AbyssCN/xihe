@@ -124,8 +124,22 @@ export function withLoopConfig(
   const budgetMs = base.loopBudget?.ms;
   // 1-A (2026-09-03): 判据引用、此刻不存在的文件 → conductor 第一个派发只准写它们, 之后冻结 (闸在 orchestrating-loop)。
   // 回灌第二跑时文件已存在 → 这里算出 [], 但 ledger.criterionFreeze 里已有 hashes → 工具面从那里恢复保护 (initFreezeState)。
-  const criterionFiles = runnable ? missingPathArgs(runnable.command, host.cwd) : [];
-  const freezeFiles = criterionFiles.length ? criterionFiles : ledger?.criterionFreeze?.files ?? [];
+  //
+  // 逃生口 `OMD_CRITERION_FREEZE=0` (2026-09-05, 引擎回归定位实验): 关掉整个 1-A ——
+  // criterionFiles 恒空 ⇒ 不强制第一发写集、不拒非单节点 work()、不锁判据文件。
+  //
+  // 为什么需要它: dsw/dswr (5458fd4a **之前**, 无 1-A) 0.740; p6/dsc (之后) 0.610/0.659,
+  // 同座位同题集差 0.081 (2.3σ)。而 1-A 恰恰规定了「第一步必须做什么」, 与 §引擎理念 ②
+  // 「边界之内引擎不规定怎么做」相悖; 同批实测判据方向性 green-before 7 题 reward 仅 0.212 ——
+  // 判据方向本就不可靠, 1-A 却把整场锁死在第一步写出来的那个判据上。
+  // 这是**可证伪假设**, 不是结论: 关掉后若仍 ~0.66, 说明 1-A 不是那 0.081 的主因, 回去二分。
+  //
+  // ⚠ 默认恒开 —— 只有显式 `=0` 才关, 其余取值 (含缺席/空串/'1') 一律照旧, 存量行为逐字节不变。
+  const freezeOff = process.env.OMD_CRITERION_FREEZE?.trim() === '0';
+  const criterionFiles = runnable && !freezeOff ? missingPathArgs(runnable.command, host.cwd) : [];
+  // 关掉时连 ledger 恢复那条也要断: 否则回灌第二跑会从 `ledger.criterionFreeze` 把保护捡回来,
+  // 逃生口就只关了一半 (那种"关了但没全关"的旋钮比没有旋钮更坏 —— 读数会归错因)。
+  const freezeFiles = freezeOff ? [] : criterionFiles.length ? criterionFiles : ledger?.criterionFreeze?.files ?? [];
   const conductorId = conductorNodeIdOf(plan);
   // 2026-09-04:三份名册进 ConductorFacts(与 ctx.registries 同源,不重复扫盘)。空数组也传(undefined 时
   // 渲染行不出现,但传过去 [] 不会让 conductor 误以为「没注册」)。

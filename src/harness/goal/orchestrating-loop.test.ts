@@ -741,3 +741,40 @@ describe('1-A (2026-09-03): 判据先落盘冻结', () => {
     expect(guarded).toEqual([['tests/a.test.ts']]);
   });
 });
+
+// ── 1-A 逃生口 (2026-09-05, 引擎回归定位实验) ──────────────────────────────────
+//
+// dsw/dswr (5458fd4a 之前, 无 1-A) 0.740 vs p6/dsc (之后) 0.610/0.659 —— 同座位同题集
+// 差 0.081 (2.3σ)。1-A 规定了「第一步必须做什么」, 而同批实测判据方向性 green-before
+// 7 题 reward 仅 0.212。逃生口让这个假设可以被一批读数证伪。
+describe('OMD_CRITERION_FREEZE 逃生口', () => {
+  const withEnv = async <T>(v: string | undefined, fn: () => Promise<T>): Promise<T> => {
+    const prev = process.env.OMD_CRITERION_FREEZE;
+    if (v === undefined) delete process.env.OMD_CRITERION_FREEZE;
+    else process.env.OMD_CRITERION_FREEZE = v;
+    try { return await fn(); } finally {
+      if (prev === undefined) delete process.env.OMD_CRITERION_FREEZE;
+      else process.env.OMD_CRITERION_FREEZE = prev;
+    }
+  };
+
+  const run = async (cwd: string) =>
+    runGoal('修 add()', {
+      ...baseCfg(cwd, { _classify: classify({ n: 0 }, EXEC_ACCEPT), _runDag: fakeEngine([]) }),
+      dag: { conductorModel: 'c:m', leafModel: 'l:m' } as ExecutorDagConfig,
+    });
+
+  test('★ =0 → 1-A 整个关掉 (criterionFreeze 缺席)', async () => {
+    const r = await withEnv('0', () => run(mkdtempSync(join(tmpdir(), 'omd-freeze-off-'))));
+    // 证伪: 去掉 loop-run.ts 的 freezeOff 判断 → criterionFreeze 在场, 本条红。
+    expect(r.loop!.criterionFreeze).toBeUndefined();
+  });
+
+  test('★ 缺席 / 空串 / "1" 一律照旧 —— 只有显式 =0 才关 (存量行为逐字节不变)', async () => {
+    for (const v of [undefined, '', '1']) {
+      const r = await withEnv(v, () => run(mkdtempSync(join(tmpdir(), 'omd-freeze-on-'))));
+      // 证伪: 把判据写成 `!== '1'` 之类的宽松式 → 这三种取值里至少一种会误关, 本条红。
+      expect(r.loop!.criterionFreeze).toBeDefined();
+    }
+  });
+});
