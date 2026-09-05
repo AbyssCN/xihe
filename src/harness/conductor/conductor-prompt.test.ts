@@ -4,7 +4,8 @@
  * 往前缀里加 20k 画图说明 → ①红。
  */
 import { describe, expect, test } from 'bun:test';
-import { buildConductorSystemPrompt, CONDUCTOR_PROMPT_BOUNDARY, CONDUCTOR_PROMPT_PREFIX_MAX, CONDUCTOR_PROMPT_RESIDENT_MAX, renderConductorPrefix } from './conductor-prompt';
+import { buildConductorSystemPrompt, conductorPromptBudgetChars, CONDUCTOR_PROMPT_BOUNDARY, CONDUCTOR_PROMPT_PREFIX_MAX, CONDUCTOR_PROMPT_RESIDENT_MAX, renderConductorPrefix } from './conductor-prompt';
+import { SURVEY_PACK_HEADER } from '../goal/survey-pack';
 import { createConductorTools, CONDUCTOR_TOOL_NAMES } from './tools/index';
 import { renderManual } from './render-manual';
 import type { ConductorCtx, ConductorTool } from './types';
@@ -102,5 +103,52 @@ describe('1-A (2026-09-03): 判据文件先落盘的事实行', () => {
     expect(withFiles.length - base.length).toBeLessThanOrEqual(140);
     expect(base).not.toContain('Missing now:');
     expect(buildConductorSystemPrompt({ ...FULL_FACTS, criterionFiles: [] }, tools)).not.toContain('Missing now:');
+  });
+});
+
+/**
+ * W1 勘察包 (2026-09-06, 契约 `docs/plan/2026-09-06-墙钟与读次数-执行契约.md` INV-2)。
+ *
+ * 勘察包是**独立一段**, 不进 facts 块: facts 块的 8000 字符预算 (INV-8) 一个字都不改,
+ * 预算口径改成「勘察包之前的那一段」—— 包本身在闸里显式豁免。
+ *
+ * 证伪: 把包拼进 `renderConductorFacts` (而不是独立段) ⇒ 「facts 块逐字节不变」红;
+ * `conductorPromptBudgetChars` 不切段 (直接返 `prompt.length`) ⇒ 「预算口径」红;
+ * 缺席时仍拼一个空段 ⇒ 「不给包字节不变」红。
+ */
+describe('W1: 勘察包独立段 + INV-8 预算豁免', () => {
+  const tools = createConductorTools(ctx);
+  const PACK = `${SURVEY_PACK_HEADER}\n\n--- 仓树 (深度 2, 3 条) ---\nsrc/\nsrc/harness/\nREADME.md`;
+
+  test('★ 不给 surveyPack ⇒ prompt 逐字节不变 (缺席 = 零影响)', () => {
+    const base = buildConductorSystemPrompt(FULL_FACTS, tools);
+    expect(buildConductorSystemPrompt({ ...FULL_FACTS, surveyPack: undefined }, tools)).toBe(base);
+    // 空串也当缺席 —— 只有头行的空壳等于凭空多一段噪声。
+    expect(buildConductorSystemPrompt({ ...FULL_FACTS, surveyPack: '' }, tools)).toBe(base);
+    expect(base).not.toContain(SURVEY_PACK_HEADER);
+  });
+
+  test('★ 给 surveyPack ⇒ 头行在 facts 块之后, facts 块本身逐字节不变', () => {
+    const base = buildConductorSystemPrompt(FULL_FACTS, tools);
+    const withPack = buildConductorSystemPrompt({ ...FULL_FACTS, surveyPack: PACK }, tools);
+    // 证伪: 包拼进 facts 块 (而不是追在末尾) ⇒ 本行红。
+    expect(withPack.startsWith(base)).toBe(true);
+    expect(withPack.endsWith(PACK)).toBe(true);
+    expect(withPack.indexOf(SURVEY_PACK_HEADER)).toBeGreaterThan(withPack.indexOf(CONDUCTOR_PROMPT_BOUNDARY));
+  });
+
+  test('★ INV-8: 8000 这个数不动 —— 8k 的包不撑破预算口径 (包在闸里显式豁免)', () => {
+    const big = `${SURVEY_PACK_HEADER}\n\n${'x'.repeat(8000)}`;
+    const p = buildConductorSystemPrompt({ ...FULL_FACTS, surveyPack: big }, tools);
+    // 总长确实超 8000 —— 所以预算口径必须切段, 否则这条闸对着一个不归它管的数字报警。
+    expect(p.length).toBeGreaterThan(CONDUCTOR_PROMPT_RESIDENT_MAX);
+    expect(conductorPromptBudgetChars(p)).toBeLessThanOrEqual(CONDUCTOR_PROMPT_RESIDENT_MAX);
+    console.log(`conductor budget(含 8k 包)=${conductorPromptBudgetChars(p)} chars, 总长=${p.length}`);
+  });
+
+  test('没有包 ⇒ 预算口径 = 全长 (豁免只对真有包的那一段生效)', () => {
+    const p = buildConductorSystemPrompt(FULL_FACTS, tools);
+    expect(conductorPromptBudgetChars(p)).toBe(p.length);
+    expect(p.length).toBeLessThanOrEqual(CONDUCTOR_PROMPT_RESIDENT_MAX);
   });
 });

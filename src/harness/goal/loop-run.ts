@@ -30,6 +30,7 @@ import { loadProfiles } from '../profiles/profile';
 import { loadAgentTemplates } from '../agent-templates';
 import { knownMcpServerNames } from '../../mcp/client/config';
 import { createReadLedger } from '../read-ledger';
+import { buildSurveyPack, type SurveyPack } from './survey-pack';
 import {
   CONDUCTOR_INFRA_FAILURE_KINDS,
   CONDUCTOR_NODE_ID,
@@ -150,9 +151,23 @@ export function withLoopConfig(
   // 2026-09-04:三份名册进 ConductorFacts(与 ctx.registries 同源,不重复扫盘)。空数组也传(undefined 时
   // 渲染行不出现,但传过去 [] 不会让 conductor 误以为「没注册」)。
   const reg = ctx.registries ?? { profiles: [], templates: [], servers: [] };
+  // W1 (2026-09-06): 勘察包**算一次**, conductor 面与每个 work 子节点共用同一份 (见 ./survey-pack)。
+  // 治的读数: 每题 36-44 次 LLM 调用里, conductor 约 23 步在读仓、work 子节点又有 47% 的步在重读同一批东西。
+  // fail-open (④ 告知层): 算不出来只是少一段事实, 绝不许挡住点火 —— 但不吞证据 (§静默坑 2)。
+  const conductorGoal = plan.nodes[conductorId]?.goal ?? task;
+  let surveyPack: SurveyPack | undefined;
+  try {
+    surveyPack = buildSurveyPack(conductorGoal, host.cwd);
+  } catch (err) {
+    logger.warn({ cwd: host.cwd, err: String(err).slice(0, 200) }, '[loop-run] W1 勘察包算不出来 → 这趟没有包 (照跑)');
+  }
+  // 读数进运行期账本 (回灌第二跑会覆盖为那一跑的值 —— 两跑各自算各自的包)。
+  if (ledger && surveyPack) {
+    ledger.surveyPack = { chars: surveyPack.facts.chars, sections: surveyPack.facts.sections, ...(surveyPack.why ? { why: surveyPack.why } : {}) };
+  }
   const face = buildConductorFace(
     {
-      goal: plan.nodes[conductorId]?.goal ?? task,
+      goal: conductorGoal,
       writeRoot: host.cwd,
       protectedPaths: extractProtectedPaths(task),
       ...(ctx.acceptance ? { acceptance: ctx.acceptance } : {}),
@@ -164,6 +179,8 @@ export function withLoopConfig(
       profiles: reg.profiles,
       templates: reg.templates,
       mcpServers: reg.servers,
+      // W1: 独立一段, 排在 facts 块之后; 空包不进 (缺席 ⇒ prompt 逐字节同旧)。
+      ...(surveyPack?.text ? { surveyPack: surveyPack.text } : {}),
     },
     {
       ctx,
@@ -174,6 +191,8 @@ export function withLoopConfig(
       // `withLoopConfig`, 那时是新的一副 conductor 面、新的一轮勘察; 沿用上一跑的账等于把上一跑
       // 读到的东西交接给这一跑的子节点 (与 `ConductorCardLedger` 刻意相反: 那本数的是「这趟 run」)。
       readLedger: createReadLedger(),
+      // W1: **同一份**包也进 work 子节点 goal (adaptCard 追加), 两层共用一次机械勘察。
+      ...(surveyPack?.text ? { surveyPack: surveyPack.text } : {}),
     },
   );
   return {

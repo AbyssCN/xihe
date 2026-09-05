@@ -41,7 +41,7 @@ import { probeCriterionDirection } from './acceptance-gate';
 import type { ConductorPlan } from '../conductor-plan';
 import type { ExecutorDagResult, LeafResult } from '../dag/types';
 import type { LeafFace } from '../leaf-runners';
-import { buildConductorSystemPrompt, CONDUCTOR_PROMPT_RESIDENT_MAX, type ConductorFacts } from '../conductor/conductor-prompt';
+import { buildConductorSystemPrompt, conductorPromptBudgetChars, CONDUCTOR_PROMPT_RESIDENT_MAX, type ConductorFacts } from '../conductor/conductor-prompt';
 import { createConductorTools, formatRejection, invokeConductorTool } from '../conductor/tools/index';
 import type { ConductorCtx, ConductorTool } from '../conductor/types';
 import { logger } from '../logger';
@@ -314,6 +314,12 @@ export interface ConductorRuntimeDeps {
    * 缺席 = 不交接 (子 goal 逐字同旧); 空账 = 不追加但记 `handoffChars: 0` (NULL ≠ 0)。
    */
   readLedger?: ReadLedger;
+  /**
+   * W1 (2026-09-06) 勘察包原文 (`./survey-pack` 出品): conductor 面上那一份**同一份**追进
+   * `work` 子节点 goal —— 一次机械勘察两层共用, 子节点不必把仓树 / README / 既有测试再读一遍。
+   * 缺席 / 空串 = 不追加 (子 goal 逐字同旧)。
+   */
+  surveyPack?: string;
 }
 
 function toTypebox(schema: z.ZodType): ReturnType<typeof Type.Unsafe> {
@@ -438,6 +444,11 @@ function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () 
         if (prior) plan = injectPriorResult(plan, resumeOf, prior);
         else logger.warn({ resumeOf }, '[orchestrating-loop] resume_of 指向的 id 本 run 没跑过 → 不回灌 (fresh 派发, 留证)');
       }
+      // W1 勘察包 (2026-09-06): conductor 面上那份仓内事实, **同一份**追进子节点 goal ——
+      // 两层共用一次机械勘察 (work 子节点 2371 个工具步里 47% 是只读勘察, 大半是 conductor 已经读过的)。
+      // 只对 `work` 卡, 理由同下面 W2 那段; 追在交接段**之前** (静态仓内事实在前, 本轮读账在后)。
+      // 复用 appendHandoff 那一跳 —— 它就是「往每个子节点 goal 末尾追一段」, 不新造第二份。
+      if (card.name === 'work' && deps.surveyPack) plan = appendHandoff(plan, deps.surveyPack);
       // W2 读账交接 (2026-09-06): conductor 这一轮真读过的东西, 引擎机械 append 进子节点 goal。
       // 只对 `work` 卡 —— 它是「一个 worker 干一处有界改动」那一型, 正是把 conductor 读过的东西
       // 再读一遍的那一型; 其余卡各有自己的输入形状, 不在本次读数范围内。
@@ -545,10 +556,14 @@ function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () 
 export function buildConductorFace(facts: ConductorFacts, deps: ConductorRuntimeDeps): LeafFace {
   const cards = createConductorTools(deps.ctx);
   const systemPrompt = buildConductorSystemPrompt(facts, cards);
-  if (systemPrompt.length > CONDUCTOR_PROMPT_RESIDENT_MAX) {
-    logger.warn({ chars: systemPrompt.length, max: CONDUCTOR_PROMPT_RESIDENT_MAX }, '[orchestrating-loop] conductor 常驻 prompt 超 INV-8 上限 (照跑, 留证)');
+  // W1 (2026-09-06): INV-8 的 8000 只管 facts 块 —— 勘察包是独立段, 在这道闸里显式豁免
+  // (口径见 conductorPromptBudgetChars; 8000 这个数没动)。包自己的字符数由 ledger.surveyPack 单记,
+  // 两个数分开才看得出「facts 块涨了」与「这趟包大」是两件事 (§静默坑 1)。
+  const budgetChars = conductorPromptBudgetChars(systemPrompt);
+  if (budgetChars > CONDUCTOR_PROMPT_RESIDENT_MAX) {
+    logger.warn({ chars: budgetChars, total: systemPrompt.length, max: CONDUCTOR_PROMPT_RESIDENT_MAX }, '[orchestrating-loop] conductor 常驻 prompt 超 INV-8 上限 (照跑, 留证)');
   }
-  if (deps.ledger) deps.ledger.residentPromptChars = systemPrompt.length;
+  if (deps.ledger) deps.ledger.residentPromptChars = budgetChars;
   // grind 停滞钟的进度信号 (2026-09-05)。conductor 结构上不写文件 → 叶子那把"写入新路径"的尺子
   // 对它恒不走, 三档退化成无条件 25 分钟 abort (实账 R0 `stallAtAbort=1536108ms` ≈ 节点全寿命)。
   // 它的进展 = **真派出去并拿回了结果**: `dispatches` 在派成 (:492) 与子图报错 (:440) 两处都 push,

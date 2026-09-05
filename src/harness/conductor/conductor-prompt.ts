@@ -12,6 +12,7 @@
  * 证伪方式(conductor-prompt.test.ts): 把任一 manual 拼进来 → 「manual 首行一条都不出现」即红;
  * 渲染时调 `tool.manual()` → spy 计数即红;工具行不取自 `short` → 逐字比对即红。
  */
+import { SURVEY_PACK_HEADER } from '../goal/survey-pack';
 import type { ConductorTool } from './types';
 
 export const CONDUCTOR_PROMPT_BOUNDARY = '## RUN FACTS (everything above this line is identical for every run; everything below is this run)';
@@ -37,6 +38,12 @@ export interface ConductorFacts {
   templates?: readonly string[];
   /** 同上,已注册 MCP server 名册。 */
   mcpServers?: readonly string[];
+  /**
+   * W1 (2026-09-06): 引擎机械勘察包原文 (`goal/survey-pack` 出品, 自带 {@link SURVEY_PACK_HEADER} 头行)。
+   * 渲染成 facts 块**之后**的独立一段; 缺席 / 空串 ⇒ prompt 逐字节同旧。
+   * ⚠ 它**不进** INV-8 的 8000 字符预算 —— 口径见 {@link conductorPromptBudgetChars}。
+   */
+  surveyPack?: string;
 }
 
 const ROLE = `You are the CONDUCTOR of an omd run. You own the goal from the first message to the final report: you brief and judge workers; you do not edit files yourself. The engine keeps the books (gates, checkpoints, budgets, acceptance, verifier). Your job is what it cannot do: decide what work exists, brief it well, know when it is done.`;
@@ -142,9 +149,24 @@ export function renderConductorFacts(f: ConductorFacts): string {
   return lines.filter((l): l is string => l !== undefined).join('\n') + up;
 }
 
-/** 完整常驻 system prompt。 */
+/** 完整常驻 system prompt。W1: 勘察包在最末尾自成一段 (缺席 ⇒ 前面那截逐字节同旧)。 */
 export function buildConductorSystemPrompt(facts: ConductorFacts, tools: readonly ConductorTool[]): string {
-  return `${renderConductorPrefix(tools)}\n\n${CONDUCTOR_PROMPT_BOUNDARY}\n\n${renderConductorFacts(facts)}`;
+  const head = `${renderConductorPrefix(tools)}\n\n${CONDUCTOR_PROMPT_BOUNDARY}\n\n${renderConductorFacts(facts)}`;
+  return facts.surveyPack ? `${head}\n\n${facts.surveyPack}` : head;
+}
+
+/**
+ * INV-8 预算的口径 (W1, 2026-09-06): **只数勘察包之前的那一段**。
+ *
+ * 8000 这个数一个字没改, 改的是它管谁: 它管的一直是「每一发都要重付的常驻前缀 + 本 run 事实」。
+ * 勘察包换来的是**更少的轮数** (conductor 不必再花 20 多步把这些事实自己读一遍), 拿它去撞一条
+ * 为 facts 块定的上限, 等于让闸对着一个不归它管的数字报警 —— 所以在这里显式豁免, 而不是把上限调大。
+ *
+ * 判据是包的头行 ({@link SURVEY_PACK_HEADER}): 没有头行的包不豁免 (fail-closed, 宁可多报不放过)。
+ */
+export function conductorPromptBudgetChars(prompt: string): number {
+  const at = prompt.indexOf(SURVEY_PACK_HEADER);
+  return at < 0 ? prompt.length : at;
 }
 
 /** INV-8 的上限。测试与运行期断言共用这一个数。 */

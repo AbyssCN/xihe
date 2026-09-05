@@ -145,6 +145,21 @@ export interface ConductorCardLedger {
   criterionFreeze?: CriterionFreeze;
   /** #205 方向性探针结论 (冻结点写入; 语义见 LoopLedger.criterionDirection)。 */
   criterionDirection?: 'red-before' | 'green-before' | 'inconclusive';
+  /** W1 勘察包读数 (装配期写一次; 语义见 {@link LoopLedger.surveyPack})。 */
+  surveyPack?: SurveyPackFacts;
+}
+
+/**
+ * W1 勘察包读数 (2026-09-06, 见 `./survey-pack`)。
+ *
+ * 三态别压平 (§静默坑 1): 整格缺席 = **没算包** (走的不是编排循环 / 老记录);
+ * `sections` 空数组 = 算了但一段都没勘察到 (空仓); `why` 在场 = 有段失败或撞墙钟, 原文在里面
+ * (段缺席不等于段失败 —— 不是 git 仓时 `git` 段不在 `sections` 里而 `why` 缺席)。
+ */
+export interface SurveyPackFacts {
+  chars: number;
+  sections: string[];
+  why?: string;
 }
 
 export function createConductorCardLedger(): ConductorCardLedger {
@@ -263,6 +278,16 @@ export interface LoopLedger {
    * 两者别并掉 (§静默坑 1)。`why` 在场 = 有段失败或撞墙钟, 原文在里面。
    */
   criterionSurvey?: CriterionSurveyFacts & { why?: string };
+  /**
+   * W1 勘察包读数 (2026-09-06, 见 `./survey-pack`): 算了多大一份、哪几段成了、哪一段炸了。
+   *
+   * 挂在这里的理由同上面几格: 只有 `r.loop` 整份 JSON 出得了 bench 容器。
+   * ⚠ 三态见 {@link SurveyPackFacts}。
+   * ⚠ **本格今天到不了这里**: 运行期那份写在 `ConductorCardLedger.surveyPack` 上, 而
+   * `LoopLedger` 由 `run-goal.ts` 逐字段组装 —— 那一跳 (`surveyPack: loopLedger.surveyPack`)
+   * 属于本契约写集之外的文件, 未接。读数今天从 `ConductorCardLedger` / 日志读。
+   */
+  surveyPack?: SurveyPackFacts;
   /**
    * 判据三候选共识的一致性读数 (2026-09-05, 见 `./criterion-consensus`)。
    *
