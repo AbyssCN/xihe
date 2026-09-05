@@ -46,6 +46,7 @@ import { gitWriteBlockReason, secretPathInCommand, SECRET_BASENAMES, SECRET_BASE
 import { logger } from '../logger';
 import { openTouchLedger, type TouchLedger, type TouchOp, type TouchSource } from './writeset/touch-ledger';
 import { verifiedShellWriteTargets } from './writeset/shell-writes';
+import { classifyShellReadonly, observeSafely, type ReadEvent } from './read-ledger';
 import { HAND_TOOL_RENDERERS } from './tool-render';
 
 /**
@@ -596,6 +597,18 @@ export interface OmdAgentToolsOpts {
    * 台账库锚在 cwd 的 `.omd/touch.db` (触碰发生的工作根; 隔离档下 worktree 各写各的)。
    */
   touch?: { session: string | (() => string | undefined) };
+  /**
+   * **读账观察口** (W2, 2026-09-06, 契约 `docs/plan/2026-09-06-墙钟与读次数-执行契约.md`)。
+   * `read` / `ls` / `grep` / 只读形态的 `bash` 在**返回之前**各调一次, 参数 = 这次读了什么 + 返回正文。
+   *
+   * 只报不拦 (§引擎理念 ④): 钩子抛错吞掉留证据 (`observeSafely`), 工具的返回值一个字节都不因它而变。
+   * 消费者是编排循环: conductor 读过的东西按 key 记账, 派 `work` 时机械交接进子节点 goal ——
+   * 治的是「子节点把 conductor 刚读过的东西再读一遍」(实测 conductor 61% 的 bash 步是只读勘察)。
+   *
+   * 缺省 = 缺席, 四个工具的行为与返回字节与本参数出现之前**逐字相同** (handoff-wiring.test.ts 显式钉)。
+   * 与 `touch` / `writeAllow` 同一条纪律: runner 跨调用复用时由调用方在这里挂 getter, 别把某一次的账烤进装配期。
+   */
+  onToolObserved?: (ev: ReadEvent) => void;
 }
 
 /**
@@ -787,6 +800,8 @@ export function createOmdAgentTools(opts: OmdAgentToolsOpts): AnyOmdTool[] {
       const note = t.truncated
         ? `\n[truncated: 只给了前 ${t.outputLines} 行, 共 ${all.length} 行 — 用 offset 继续读]`
         : '';
+      // W2 读账 (只报不拦): 记的是**引擎看见的返回正文**, 不是模型的复述。
+      observeSafely(opts.onToolObserved, { kind: 'read', key: `read ${display(cwd, full)}`, excerpt: `${t.content}${note}` });
       return textResult(`${t.content}${note}`, { path: display(cwd, full), lines: all.length, truncated: t.truncated });
     },
   };
@@ -932,6 +947,8 @@ export function createOmdAgentTools(opts: OmdAgentToolsOpts): AnyOmdTool[] {
         .map((e) => (e.kind === 'directory' ? `${e.name}/` : e.name));
       const shown = entries.slice(0, cap);
       const more = entries.length > shown.length ? `\n… 还有 ${entries.length - shown.length} 项 (调大 limit)` : '';
+      // W2 读账 (只报不拦)。
+      observeSafely(opts.onToolObserved, { kind: 'ls', key: `ls ${display(cwd, full)}`, excerpt: `${shown.join('\n')}${more}` });
       return textResult(`${display(cwd, full)}:\n${shown.join('\n')}${more}`, {
         path: display(cwd, full),
         count: entries.length,
@@ -1015,6 +1032,12 @@ export function createOmdAgentTools(opts: OmdAgentToolsOpts): AnyOmdTool[] {
           : `\n[⚠ 跳过 ${skipped.slice(0, MOUNT_REPORT_CAP).map((m) => display(cwd, m)).join(' · ')}` +
             `${skipped.length > MOUNT_REPORT_CAP ? ` 等 ${skipped.length} 处` : ''}` +
             ' —— 远端挂载 (9p/NAS/网络盘), 递归遍历会拖死整台机器。要搜就直接 path= 指到那里面]';
+      // W2 读账 (只报不拦): key 带上 pattern 与搜索根 —— 同一个词在两个目录下搜是两次勘察。
+      observeSafely(opts.onToolObserved, {
+        kind: 'grep',
+        key: `grep ${pattern}${path ? ` @ ${display(cwd, root)}` : ''}${glob ? ` glob=${glob}` : ''}`,
+        excerpt: `${head}${more}${cut}${mounts}`,
+      });
       return textResult(`${head}${more}${cut}${mounts}`, {
         matches: hits.length,
         files: filesWithHits,
@@ -1227,6 +1250,11 @@ export function createOmdAgentTools(opts: OmdAgentToolsOpts): AnyOmdTool[] {
       ]
         .filter(Boolean)
         .join(' ');
+      // W2 读账 (只报不拦): **只收只读勘察形态** —— 跑测试 / 装依赖 / 写文件的命令不进账,
+      // 交接的是「我看见了什么」, 不是「我做了什么」(后者已在派发台账与 filesTouched 里)。
+      if (classifyShellReadonly(command)) {
+        observeSafely(opts.onToolObserved, { kind: 'bash-readonly', key: `bash ${command}`, excerpt: `${cleanOutput}${tail ? `\n${tail}` : ''}` });
+      }
       return textResult(`${cleanOutput}${tail ? `\n${tail}` : ''}`, { exitCode, truncated, sanitized });
     },
   };

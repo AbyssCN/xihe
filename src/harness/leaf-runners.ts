@@ -11,6 +11,7 @@ import type { SelfCheckSpec } from './conductor-plan';
 import type { AgentEvent } from '@earendil-works/pi-agent-core';
 import type { LeafProfile } from './profiles/profile';
 import type { AnyOmdTool } from './agent-tools';
+import type { ReadEvent } from './read-ledger';
 import type { CriteriaDiff } from './dag/spin-rung2';
 
 // ── agent leaf(带工具的 pi session,能改文件)────────────────────────
@@ -152,6 +153,15 @@ export interface LeafFace {
   readOnlyShell?: boolean;
   /** R-1: 只读闸每拒一次调一次 (计数进 loop 账本)。缺席 = 不计。 */
   onReadOnlyBlocked?: () => void;
+  /**
+   * W2 读账观察口 (2026-09-06, 契约 `docs/plan/2026-09-06-墙钟与读次数-执行契约.md`):
+   * 名单里的 `read` / `ls` / `grep` / 只读形态的 `bash` 在**返回之前**各调一次。
+   *
+   * **必须走这条按调用的路** —— 工具是 runner 装配期建一次、跨 run 复用的, 把某一趟的账烤进
+   * 装配期就会把上一个 conductor 读过的东西交接给这一个 (同 `writeAllow` / `touch` 那条纪律)。
+   * 缺席 = 不记, 四个工具的返回字节与本字段出现之前逐字相同。只报不拦: 抛错吞掉留证据。
+   */
+  onToolObserved?: (ev: ReadEvent) => void;
   /**
    * **这副面的"有进展"读数** —— grind 停滞钟的进度信号,单调不减。缺席 = 叶子口径
    * (写入一个新文件路径才算进展, 见 agent-leaf 的 `lastTouchGrowthAtMs`)。

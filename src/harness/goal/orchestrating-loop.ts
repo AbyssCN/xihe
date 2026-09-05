@@ -46,6 +46,7 @@ import { createConductorTools, formatRejection, invokeConductorTool } from '../c
 import type { ConductorCtx, ConductorTool } from '../conductor/types';
 import { logger } from '../logger';
 import { checkCoords } from './coord-check';
+import { HANDOFF_HEADER, type ReadLedger } from '../read-ledger';
 import { briefHasRepro, computeLoopDispatchFacts, type CriterionFreeze, type ConductorCardLedger, type ConductorCardName } from './loop-ledger';
 
 /** plan 名 —— run-goal 的 `_runDag` 注入口与测试靠它认路径 (与 `goal-execute` / `goal-execute-flat` 同一约定)。 */
@@ -264,6 +265,29 @@ export function injectPriorResult(plan: ConductorPlan, id: string, prior: LeafRe
   return { ...plan, nodes: { ...plan.nodes, [id]: { ...node, goal: `${node.goal ?? ''}${block}` } } } as ConductorPlan;
 }
 
+/** W2 交接段的渲染预算 (字符)。conductor 常驻 prompt 的 INV-8 是另一件事 —— 这一段进的是**子节点 goal**, 不进常驻面。 */
+export const HANDOFF_MAX_CHARS = 4000;
+
+/**
+ * W2 (2026-09-06): 把 conductor 的读账 append 进图里每个节点的 goal。
+ *
+ * 与 {@link injectPriorResult} 同一条纪律: 不原地改, 返回新对象; 空串一个字都不追加
+ * (「conductor 什么都没勘察」不该被渲染成一段空事实, §静默坑 1)。
+ *
+ * ⚠ 位置在 `#241` 坐标校验**之后** —— 这一段是引擎从真工具返回里抄下来的路径, 不是 conductor 写的坐标,
+ * 拿去过那道闸只会把引擎自己的事实判成幻觉。
+ *
+ * falsify (本函数必须能真红): 把 `if (!handoff) return plan` 改成照样拼 ⇒
+ * handoff-wiring.test.ts 的「空账不追加」当场红。
+ */
+export function appendHandoff(plan: ConductorPlan, handoff: string): ConductorPlan {
+  if (!handoff) return plan;
+  const nodes = Object.fromEntries(
+    Object.entries(plan.nodes).map(([id, node]) => [id, { ...node, goal: `${node.goal ?? ''}\n\n${handoff}` }]),
+  );
+  return { ...plan, nodes } as ConductorPlan;
+}
+
 export interface ConductorRuntimeDeps {
   ctx: ConductorCtx;
   /**
@@ -281,6 +305,15 @@ export interface ConductorRuntimeDeps {
   criterionFreeze?: { files: readonly string[]; root: string };
   /** 路径禁令的注入口 (测试用 spy); 缺省 = agent-tools 的 withProtectedPaths。 */
   withProtected?: typeof withProtectedPaths;
+  /**
+   * W2 (2026-09-06) conductor 的**读账**: 引擎按工具调用记的一本账 (`../read-ledger`),
+   * 派 `work` 时渲染成一段追加进子节点 goal。
+   *
+   * 治的读数: conductor 每题 ~23 步在读仓, 而子节点拿到的只有一段自由文本 `brief` ——
+   * 它只能把同样的东西再读一遍。交接段是**引擎记的**, 不是 conductor 自述的。
+   * 缺席 = 不交接 (子 goal 逐字同旧); 空账 = 不追加但记 `handoffChars: 0` (NULL ≠ 0)。
+   */
+  readLedger?: ReadLedger;
 }
 
 function toTypebox(schema: z.ZodType): ReturnType<typeof Type.Unsafe> {
@@ -405,6 +438,12 @@ function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () 
         if (prior) plan = injectPriorResult(plan, resumeOf, prior);
         else logger.warn({ resumeOf }, '[orchestrating-loop] resume_of 指向的 id 本 run 没跑过 → 不回灌 (fresh 派发, 留证)');
       }
+      // W2 读账交接 (2026-09-06): conductor 这一轮真读过的东西, 引擎机械 append 进子节点 goal。
+      // 只对 `work` 卡 —— 它是「一个 worker 干一处有界改动」那一型, 正是把 conductor 读过的东西
+      // 再读一遍的那一型; 其余卡各有自己的输入形状, 不在本次读数范围内。
+      // 三态: 读账缺席 → `handoffChars` 缺席 (这条路没装账); 账空 → 0 且不追加 (§静默坑 1)。
+      const handoff = card.name === 'work' && deps.readLedger ? deps.readLedger.render(HANDOFF_MAX_CHARS) : '';
+      if (card.name === 'work' && deps.readLedger) plan = appendHandoff(plan, handoff);
       logger.info({ card: card.name, seq: n, plan: plan.name, nodes: Object.keys(plan.nodes).length }, '[orchestrating-loop] conductor 派发 → 嵌套 run');
       // R-1 派发台账: brief 有没有粘运行输出 (启发式, 只对有 brief 槽的卡判)。
       const briefRaw = params && typeof params === 'object' ? (params as { brief?: unknown }).brief : undefined;
@@ -414,6 +453,7 @@ function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () 
         nodes: Object.keys(plan.nodes).length,
         briefHasRepro: typeof briefRaw === 'string' ? briefHasRepro(briefRaw) : null,
         ...(typeof resumeOf === 'string' ? { resumeOf } : {}),
+        ...(card.name === 'work' && deps.readLedger ? { handoffChars: handoff.length } : {}),
       };
       let exec: ExecutorDagResult;
       // 1-A: 冻住之后, 子 run 在路径禁令里跑 —— 工具写到冻结文件当场拒 (agent-tools:664)。没冻 / 不适用 → 直接跑, 逐字节同旧。
@@ -526,6 +566,9 @@ export function buildConductorFace(facts: ConductorFacts, deps: ConductorRuntime
     // D-20 机械面 (2026-09-03, smoke8-p3 repo_understanding 那题 conductor 用 heredoc 写了 22KB 产物): bash 只读, 改文件只能派 work()。
     readOnlyShell: true,
     ...(deps.ledger ? { onReadOnlyBlocked: () => { deps.ledger!.readOnlyShellBlocked++; } } : {}),
+    // W2 (2026-09-06): 把读账的观察口挂上这副面 —— conductor 的只读手 (read/ls/grep/bash) 在返回前记账,
+    // 派 `work` 时由 adaptCard 机械交接给子节点。缺席 = 不记 (老调用方 / 测试不注入), 工具面逐字不变。
+    ...(deps.readLedger ? { onToolObserved: (ev) => deps.readLedger!.observe(ev) } : {}),
   };
 }
 

@@ -29,6 +29,7 @@ import { createConductorCardLedger, withDispatchEvidence, type ConductorCardLedg
 import { loadProfiles } from '../profiles/profile';
 import { loadAgentTemplates } from '../agent-templates';
 import { knownMcpServerNames } from '../../mcp/client/config';
+import { createReadLedger } from '../read-ledger';
 import {
   CONDUCTOR_INFRA_FAILURE_KINDS,
   CONDUCTOR_NODE_ID,
@@ -164,7 +165,16 @@ export function withLoopConfig(
       templates: reg.templates,
       mcpServers: reg.servers,
     },
-    { ctx, runChild, ...(ledger ? { ledger } : {}), ...(freezeFiles.length ? { criterionFreeze: { files: freezeFiles, root: host.cwd } } : {}) },
+    {
+      ctx,
+      runChild,
+      ...(ledger ? { ledger } : {}),
+      ...(freezeFiles.length ? { criterionFreeze: { files: freezeFiles, root: host.cwd } } : {}),
+      // W2 (2026-09-06): 这一副面一本读账。**按面建, 不跨面复用** —— D-14 回灌的第二跑会再调一次
+      // `withLoopConfig`, 那时是新的一副 conductor 面、新的一轮勘察; 沿用上一跑的账等于把上一跑
+      // 读到的东西交接给这一跑的子节点 (与 `ConductorCardLedger` 刻意相反: 那本数的是「这趟 run」)。
+      readLedger: createReadLedger(),
+    },
   );
   return {
     ...base,

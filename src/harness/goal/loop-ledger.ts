@@ -38,6 +38,15 @@ export interface LoopDispatch {
   done?: number;
   /** 写集对账: declared = 该派发 plan 里所有节点的 `write_set` 并集 (按出现顺序去重); orphan = 实际写了但没人声明; missing = 声明了但没人写。null = 该派发 plan 没有任何节点声明写集 (没合同 = 不判)。 */
   writeSet?: { declared: string[]; orphan: string[]; missing: string[] } | null;
+  /**
+   * W2 (2026-09-06): 这次派发**机械交接**给子节点的读账字符数 (见 `../read-ledger`)。
+   *
+   * 三态别压平 (§静默坑 1): 缺席 = 这条路没装读账 (非 `work` 卡 / 老记录 / 测试没注入);
+   * `0` = 装了但账是空的 (conductor 一步勘察都没做就派活) —— 后者正是要能数出来的形态。
+   * 塌了怎么读 (契约预注册): reward 掉 > 1σ 时先看这一列的分布, 交接段有没有把错误的勘察结论
+   * 固化进子节点。
+   */
+  handoffChars?: number;
 }
 
 /**

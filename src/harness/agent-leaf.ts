@@ -75,6 +75,7 @@ export function leafMcpPolicy(mcpAllow?: string[]): { sideEffects: { allow: stri
 import { SHARED_ENGINEERING_CORE, LEAF_EXECUTION_CORE, LEAF_TOOL_ROUTING } from './harness-prompts';
 import type { SelfCheckSpec } from './conductor-plan';
 import { createOmdAgentTools, type AnyOmdTool, type OmdAgentToolsOpts, sha256Hex } from './agent-tools';
+import type { ReadEvent } from './read-ledger';
 import type { FileObservation } from './writeset/write-version';
 import { createInspectTool } from './inspect-tool';
 import { createSkillTools, type SkillToolDeps } from './skills/skill-tool';
@@ -1748,6 +1749,12 @@ export interface LeafCallScope {
    * 缺席 = 本次没派判据 → `run_acceptance` 不在工具面上。
    */
   acceptance?: { spec: SelfCheckSpec; rounds: number; last: AcceptanceOutcome | null };
+  /**
+   * W2 读账观察口 (2026-09-06): 来自**本次调用**的 `input.face.onToolObserved` (编排循环的 conductor 面)。
+   * 按调用落而不是烤进装配期 —— 工具跨 run 复用, 烤进去就会把上一趟 conductor 的勘察交接给这一趟
+   * (同 `writeAllow` / `fileObservations` 那条纪律)。缺席 = 本次不记。
+   */
+  toolObserver?: (ev: ReadEvent) => void;
 }
 
 /**
@@ -1957,6 +1964,10 @@ export function createAgentLeafRunner(opts: AgentLeafRunnerOpts = {}): AgentLeaf
     // 拿不到「后面还会不会起兄弟」这个事实**, 把判据建在拿不到的事实上等于没有判据。
     // 缺席那一路 (getter 返 undefined) 留给对话位 —— 它们压根不传这个 opt。
     fileObservations: () => touchSessionStore.getStore()?.fileObservations,
+    // W2 读账 (2026-09-06): **无条件**装 getter, 按调用从 ALS 取观察者 —— 与 `touch` 同一条 #262 教训
+    // (把一个按调用的特性锁在装配期选项后面, 生产那条路就永远取不到值)。
+    // 没有观察者时 `observeSafely` 早返回, 四个工具的返回字节逐字不变。
+    onToolObserved: (ev) => touchSessionStore.getStore()?.toolObserver?.(ev),
     // P3 S2: `run_acceptance` 的执行体按调用从 ALS 取判据 —— 同一条「thunk 不是值」纪律。
     // 白名单与 self_check 探针同源 (runtimeAllowlistForRoot, P2c);DAG-leaf 这条路 agentToolsOpts 不设
     // `sandbox`(真隔离在进程级 bwrap), 所以这里也不包 —— 与同一叶子的交互 bash 逐字同一条边界 (INV-17)。
@@ -3257,6 +3268,8 @@ export function createAgentLeafRunner(opts: AgentLeafRunnerOpts = {}): AgentLeaf
         fileObservations: new Map(),
         // P3 S2: 冻结判据随调用入 ALS, run_acceptance 的执行体只认这一份。
         ...(input.self_check ? { acceptance: { spec: input.self_check, rounds: 0, last: null } } : {}),
+        // W2: 本次调用这副面要不要记读账 (只有编排循环的 conductor 面挂它)。缺席 = 不记。
+        ...(input.face?.onToolObserved ? { toolObserver: input.face.onToolObserved } : {}),
       },
       async () => ({ ...(await runOnce(input)), gates }),
     );
