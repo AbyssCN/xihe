@@ -24,6 +24,7 @@
  */
 
 import type { CliCommand } from './registry';
+import { logger } from '../../logger';
 
 // ---------------------------------------------------------------------------
 // argv 解析 helpers —— 与 registry.ts 的 `command()` 闭包形态对齐,小幅度独立实现。
@@ -255,8 +256,10 @@ export function renderRunResult(content: unknown): string {
   let parsed: unknown;
   try {
     parsed = JSON.parse(head);
-  } catch {
-    // 不是 JSON (例如 goal 路 summarizeGoal 的多行字符串) → 原样拼回。
+  } catch (e) {
+    // 不是 JSON (例如 goal 路 summarizeGoal 的多行字符串) → 原样拼回。这不是错误路径,
+    // 但证据照留 (仓规: catch 不许吞证据; 仓内 catch 棘轮 scripts/catch-evidence-scan 盯着这条)。
+    logger.debug({ err: e instanceof Error ? e.message : String(e) }, '[cli/commands] result 首段非 JSON → 按文本渲染');
     return texts.join('\n');
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {

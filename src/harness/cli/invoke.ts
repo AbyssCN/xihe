@@ -37,6 +37,8 @@
 export interface InvokeResult {
   exitCode: 0 | 1 | 2;
   stdout: string;
+  /** 抛异常时的证据 (工具名 + 错误原文), 调用方写 stderr。吞异常不许吞证据 (仓规静默坑 2)。 */
+  stderr: string;
 }
 
 /** Minimum tool shape invokeTool needs from each entry. Production tools conform via `assembleOmdMcpTools`. */
@@ -66,26 +68,75 @@ export async function invokeTool(opts: InvokeToolOpts): Promise<InvokeResult> {
   const tools = opts.tools ?? (await loadDefaultTools());
   const entry = tools.find((t) => t.name === opts.tool);
   if (!entry) {
-    return { exitCode: 1, stdout: '' };
+    return { exitCode: 1, stdout: '', stderr: `omd: 装配面里没有工具 ${opts.tool} (registry 与 assemble 漂移?)\n` };
   }
   let content: unknown;
   let isError: boolean | undefined;
   let threw = false;
+  let stderr = '';
   try {
     content = await entry.handler(opts.args);
     const r = content as { isError?: unknown } | null | undefined;
     isError = r?.isError === true;
-  } catch {
+  } catch (e) {
     // 装配/实现错 (McpError 等同族)。response isError 缺省 = 抛前未生成。
+    // 错误原文进 stderr —— 没有它, `omd call x` 抛了只剩一个 exit 1, 排错无从下手 (Aalto 验收修 2026-09-05)。
     threw = true;
     content = undefined;
     isError = undefined;
+    stderr = `omd ${opts.tool}: ${e instanceof Error ? e.message : String(e)}\n`;
   }
   const exitCode = exitCodeFor({ isError }, threw);
   // 异常时 stdout 必为空 —— `JSON.stringify(undefined)` 是 undefined 不是 ""(GWT-4 反向自检)。
   // 编排函数不"拼一半再截断"那种把人搞糊涂的语义:异常由 exitCode 1 表达,stdout 一律 ""。
   const stdout = threw ? '' : renderStdout({ json: opts.json, render: opts.render, content });
-  return { exitCode, stdout };
+  return { exitCode, stdout, stderr };
+}
+
+/** 图类工具 (run / run-plan / resume) 起跑即返回 runId; 引擎在**本进程**后台跑 (dag-tools.ts 文件头)。
+ *  CLI 进程一退引擎就死, 所以非 detached 的 run 必须在这里等到终态 (契约 D-4)。 */
+export const RUN_TERMINAL = new Set(['done', 'failed', 'cancelled']);
+
+/** 从 run 工具的 stdout (文本或 JSON 串都行) 里取 runId (`runId: <id>`)。取不到 → undefined (调用方不等)。 */
+export function parseRunIdFromText(text: string): string | undefined {
+  const m = /runId:\s*([0-9a-zA-Z-]{2,})/.exec(text);
+  return m?.[1];
+}
+
+/** 终态 content 的文本视图 (与默认渲染同一份, 供 cli.ts 拼接终态摘要)。 */
+export function renderContentText(content: unknown): string {
+  return defaultTextRender(content);
+}
+
+/**
+ * 轮询 `dag_status` 直到终态, 返回最后一次 status 的 content。
+ * tools 里没有 dag_status (测试 fixture) → 立即返回 undefined, 不等。
+ * 反向自检: 把 RUN_TERMINAL 清空 → 本函数对真 run 永不返回 (dispatch 测试用 fixture 不受影响, 所以
+ * 这条要靠 Aalto 验收 ③ 那次真跑来证伪)。
+ */
+export async function waitForRun(
+  runId: string,
+  opts: { tools?: readonly InvokeToolEntry[]; intervalMs?: number; graceMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<unknown> {
+  const tools = opts.tools ?? (await loadDefaultTools());
+  const status = tools.find((t) => t.name === 'dag_status');
+  if (!status) return undefined;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const intervalMs = opts.intervalMs ?? 2000;
+  // run 工具起的是**子进程** (dag-tools.ts S2 进程化), 它把自己登记到 runs.db 要几秒 —— 刚起跑时
+  // dag_status 会答 `unknown run`。实测 (Aalto 验收 ③, 2026-09-05): 0 秒就问, 必答 unknown。
+  // 所以「认不出 status 行」在宽限期内继续等, 过了宽限期才当终态交回 (那时的 unknown 是真的)。
+  const graceMs = opts.graceMs ?? 60_000;
+  let waited = 0;
+  for (;;) {
+    const content = await status.handler({ runId });
+    const text = defaultTextRender(content);
+    const m = /^status:\s*(\w+)/m.exec(text);
+    if (m && RUN_TERMINAL.has(m[1]!)) return content;
+    if (!m && waited >= graceMs) return content;
+    await sleep(intervalMs);
+    waited += intervalMs;
+  }
 }
 
 /**
@@ -154,6 +205,10 @@ function defaultTextRender(content: unknown): string {
 let cachedTools: readonly InvokeToolEntry[] | undefined;
 async function loadDefaultTools(): Promise<readonly InvokeToolEntry[]> {
   if (cachedTools) return cachedTools;
+  // D-9: 引导序与 `omd mcp` / goal-worker 逐字一致 —— 不引导则 provider 注册表是空的, 进程内
+  // 跑的工具 (research / review / memory / models-auto) 会静默秒败 (实测 ③ 回执 `providers=[⚠空]`)。
+  const { bootstrapModelRuntime } = await import('../../model/bootstrap');
+  bootstrapModelRuntime();
   const mod = await import('../../mcp/assemble');
   const tools = mod.assembleOmdMcpTools();
   cachedTools = tools.map((t) => ({ name: t.name, handler: t.handler as InvokeToolEntry['handler'] }));

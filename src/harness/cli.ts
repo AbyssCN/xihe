@@ -35,7 +35,7 @@ import {
   renderUsage,
   type CliCommand,
 } from './cli/registry';
-import { invokeTool, type InvokeToolEntry } from './cli/invoke';
+import { invokeTool, parseRunIdFromText, renderContentText, waitForRun, type InvokeToolEntry } from './cli/invoke';
 import { defaultSolveSpawn, solveWorkerScriptPath, type SolveSpawn, type SolveSpawnHandle } from './cli-solve';
 import {
   collectDoctorInput,
@@ -182,7 +182,23 @@ async function dispatchInvoke(
     json,
     ...(deps.tools ? { tools: deps.tools } : {}),
   });
-  return { exitCode: result.exitCode, stdout: result.stdout, stderr: '' };
+  // D-4 (Aalto 验收修 2026-09-05): run / run-plan / resume 起跑即返回 runId, 引擎在本进程后台跑,
+  // CLI 一退引擎就死 → 非 detached 必须等到终态, 再把终态摘要接在 runId 后面。退出码按终态:
+  // done → 0, failed / cancelled → 2 (与 isError 同档: 调用形态对, 活没成)。
+  const head = cmd.path[0];
+  if (result.exitCode === 0 && (head === 'run' || head === 'run-plan' || head === 'resume')) {
+    const runId = parseRunIdFromText(result.stdout);
+    if (runId) {
+      const final = await waitForRun(runId, deps.tools ? { tools: deps.tools } : {});
+      if (final !== undefined) {
+        const text = renderContentText(final);
+        const st = /^status:\s*(\w+)/m.exec(text)?.[1];
+        const exitCode = st === 'done' ? 0 : 2;
+        return { exitCode, stdout: `${result.stdout}\n${json ? JSON.stringify(final) : text}`, stderr: result.stderr };
+      }
+    }
+  }
+  return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
 }
 
 /** D-2:`omd call <tool> [--json "<obj>"] | [--key value …]` 通用逃生口。
@@ -212,7 +228,7 @@ async function dispatchCall(
     json,
     ...(deps.tools ? { tools: deps.tools } : {}),
   });
-  return { exitCode: result.exitCode, stdout: result.stdout, stderr: '' };
+  return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
 }
 
 /** GWT-7:`omd doctor [repo]` —— collectDoctorInput → diagnose → renderDoctor。
