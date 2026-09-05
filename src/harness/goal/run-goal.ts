@@ -86,6 +86,7 @@ import { fingerprintOf, type ReviewFinding } from '../profiles/review-ledger';
 import { maybeRunDesignReview, type DesignReviewResult } from './design-review';
 import { escalationProviderReady, type VerdictTarget, type VerifierFn } from '../verifier';
 import { extractProtectedPaths } from './goal-protections';
+import { TERMINAL_ZERO_WRITE, zeroWriteVerdict, type ZeroWriteInput } from './zero-write-gate';
 import { withProtectedPaths } from '../agent-tools';
 import { compilePlaybook } from '../playbook/compile';
 import { loadPlaybookForGoal } from './playbook-direct';
@@ -463,14 +464,23 @@ export interface RunGoalResult {
   rubricRejection?: { source: 'frozen-drift' | 'probe'; reason: string };
   /**
    * **终态字面** (INV-5, 2026-08-29 否决边契约)。默认逐字等于 {@link outcome};
-   * 有两格例外 —— rubric 分型而验收步缺席时它是 {@link TERMINAL_RUBRIC_UNWIRED};
+   * 有几格例外 —— rubric 分型而验收步缺席时它是 {@link TERMINAL_RUBRIC_UNWIRED};
    * 判据命令自己没给出判词 (P2b-runtime, bare 整仓 pytest 命中 2/4/5) 时它是
-   * {@link TERMINAL_CRITERION_INCONCLUSIVE} —— 两格都是"归因不是判红/没收敛"的同类例外。
+   * {@link TERMINAL_CRITERION_INCONCLUSIVE} —— 两格都是"归因不是判红/没收敛"的同类例外;
+   * 收敛判定成立而盘上零改动时它是 {@link TERMINAL_ZERO_WRITE} (D-1); 探索型收敛时它是
+   * {@link TERMINAL_UNVERIFIED} (D-2, 机器根本没判据可判)。
    *
    * 为什么不新开一个 `RunOutcomeKind`: 那张词表有 9 个消费面 + db schema, 而这一位要答的
    * 问题是"归因时该把它算在哪一格", 不是"下一步做什么" (下一步与 not-converged 同: 别加轮数)。
    */
   terminalLabel?: string;
+  /**
+   * **D-1 零写入闸读数** (契约 2026-09-05 假 success 三闸)。三态, 不许压平 (仓规坑 ①):
+   * `checked:false` = 没查 (resume 豁免 / git 取不到, 靠 `why` 分辨) · `checked:true, zero:false`
+   * = 查了盘上有改动 · `checked:true, zero:true` = 查了盘上零改动 (这一格必伴随 `converged:false`)。
+   * 缺席 = 收敛判定本来就不成立, 闸不适用 —— **不是**"查了没事"。
+   */
+  zeroWrite?: { checked: boolean; zero?: boolean; why?: string };
   /**
    * **判据判红时的红因** (INV-2)。含 `rolled-back` = 本 run 曾转绿而终态低于那次绿
    * (去看回滚/毒集那条链); 含 `never-green` = 一次都没转过绿 (去看修复轮); 含
@@ -927,6 +937,18 @@ export const TERMINAL_CRITERION_INCONCLUSIVE = 'criterion-inconclusive';
  * 改的只是「怎么念这件事」。想数「判据坏 vs 实装坏」的读侧按此字面分。
  */
 export const TERMINAL_CRITERION_VETOED = 'criterion-vetoed';
+
+/**
+ * D-2 (2026-09-05, 契约「假 success 三闸」): **探索型验收收敛**时的终态字面。
+ *
+ * 探索型没有任何机械判据 —— 收敛的意思只是「环跑完了」, 没有任何机器判过这活成没成。
+ * 而 resultOut 首行印的是 `outcome: success`, CLI 印的是 `outcome=success`, 于是「机器判过」
+ * 与「机器没判据可判」在读侧长得一模一样, 两者的下一步却相反 (前者可以收, 后者要人看)。
+ *
+ * ⚠ 它**不翻** `converged` / `outcome` (同上两格的立场): 探索型收敛仍是 success, 改的只是
+ * 「怎么念这件事」。rubric 型不入这一格 —— rubric 判官是弱 oracle, 但它存在。
+ */
+export const TERMINAL_UNVERIFIED = 'success-unverified';
 
 /**
  * INV-5 的判据: **这一格是"没接线", 不是"判红"**。
@@ -2435,7 +2457,30 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   const verifierRejected =
     loopUsed && ((reinjected && (runnable ? !oracleOk : true)) || criterionVeto || recheck === 'fail');
   // conductor 死于基建 (2026-09-03): 哪怕 accept 复用了一份绿, 这趟也不算成 —— 引擎侧停 (infra-error), 不是交付达标。
-  const converged = loopOk && oracleOk && !verifierRejected && conductorInfraFailure === undefined;
+  const convergedByCriteria = loopOk && oracleOk && !verifierRejected && conductorInfraFailure === undefined;
+  // ── D-1 零写入闸 (契约 2026-09-05 假 success 三闸) ────────────────────────────────
+  //
+  // 收敛判定成立而工作树一个字节都没动 ⇒ 不算成 (fail-closed)。判据纯逻辑在 zero-write-gate.ts。
+  // resume 豁免: 续跑前那段活可能已被 #165② 自动收编进 commit, 工作树干净不等于没干。
+  const isResumeRun = prior !== undefined || config.dag.continuity?.resume === true;
+  const zeroWriteChanged: ZeroWriteInput['changed'] =
+    convergedByCriteria && !isResumeRun
+      ? (() => {
+          try {
+            return { files: (config.writeSet?._collectChangedFiles ?? (() => collectChangedFiles(config.cwd)))() };
+          } catch (err) {
+            // 取不到证据不等于零写入 —— fail-open 放行, 原文进 why (仓规静默坑 ②)。
+            return { error: String(err).slice(0, 200) };
+          }
+        })()
+      // 未收敛 / resume 两格在纯函数里先短路, 这个值读不到。给 error 壳而不是空 files:
+      // 万一短路哪天被改坏, 退化方向也是放行, 不是凭空判一个零写入。
+      : { error: '不适用 (未收敛 / resume, 闸不问盘)' };
+  const zeroWrite = zeroWriteVerdict({ converged: convergedByCriteria, isResume: isResumeRun, changed: zeroWriteChanged });
+  if (zeroWrite.block) {
+    logger.warn({ cwd: config.cwd }, '[run-goal] D-1 零写入闸: 收敛判定成立而盘上零改动 → 不算成 (fail-closed)');
+  }
+  const converged = convergedByCriteria && !zeroWrite.block;
   // judge 异议 (判据绿收敛而 judge 判没成): **只报不翻终态** —— 这一格是判据轴「judge 太紧 /
   // 判据覆盖不够」的样本, 判词在 continuity 的 _loop-execute.json。翻终态的版本就是 #148。
   const judgeDissent = converged && !judgeSaidOk;
@@ -2502,7 +2547,11 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
       verdictPresent: rubricVerdict !== undefined,
       rejectionPresent: rubricRejection !== undefined,
     });
-  const outcome: RunOutcomeKind = converged
+  const outcome: RunOutcomeKind = zeroWrite.block
+    // D-1: 排在整张阶梯之前 —— 被它拦下时其余各格 (取消/引擎出事/预算停/终审判红) 恒不成立
+    // (它们任一成立都会先让 convergedByCriteria 为假), 摆在最前只是让这一格的结论不依赖排序。
+    ? 'not-converged'
+    : converged
     ? hasRedLeaf
       ? 'delivered-with-red'
       : 'success'
@@ -2537,7 +2586,13 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
     : rubricUnwiredTerminal ? TERMINAL_RUBRIC_UNWIRED
     // 1-B 否决判据 (2026-09-04): 排在上面两格之后 —— 那两格问的是「判据有没有给出判词」,
     // 这一格问的是「给了判词但判词本身被终审否决」, 前两格成立时它们的归因更靠前。
-    : criterionVeto ? TERMINAL_CRITERION_VETOED : outcome;
+    : criterionVeto ? TERMINAL_CRITERION_VETOED
+    // D-1: 零写入是「判据全绿而盘上什么都没有」, 上面三格问的都是判据本身, 与它正交。
+    : zeroWrite.block ? TERMINAL_ZERO_WRITE
+    // D-2: 排在 TERMINAL_CRITERION_VETOED 之后 —— 那三格问的是「判据有没有给出判词」,
+    // 这一格问的是「有没有判据」。前三格成立时它们的归因更靠前。
+    : converged && acceptance.kind === 'exploratory' ? TERMINAL_UNVERIFIED
+    : outcome;
   stages.push({
     stage: 'execute',
     // ⚠ `status` 保持原样 (三态一字未动, 全仓 `=== 'done'` 的消费者行为不变) ——
@@ -2547,6 +2602,9 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
     summary:
       `${roundCount} 轮${
         outcome === 'success' ? '收敛'
+        // D-1: 判在最前 —— 它的成因比后面任何一格都精确 (收敛判定本来成立, 只差产物),
+        // 下一步也不同: 读 conductor 自述与 dispatches, 不是加轮数。
+        : zeroWrite.block ? '零写入: 收敛判定成立但盘上没有任何改动 (git status 空) —— 不算成; 读 conductor 自述与 dispatches, 别加轮数'
         : outcome === 'cancelled' ? `被叫停 (${cancelledReason}) — 已跑完的保留, 同 runId 可 resume`
         : outcome === 'budget-exhausted' ? `预算停: ${budgetStopped!.slice(0, 300)}`
         : outcome === 'infra-error' ? `引擎侧停: ${infraStopped!.slice(0, 300)} —— **别加轮数**, 这是引擎该修的`
@@ -2689,6 +2747,11 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
     ...(rubricRejection ? { rubricRejection } : {}),
     // 2026-08-29 否决边契约: 四位读数各自缺席即"不适用", 不兜底 (仓规坑 ①)。
     terminalLabel,
+    // D-1: 只在收敛判定成立的跑上挂 —— 没收敛时这道闸不适用, 挂一个 checked:false 会让
+    // 「闸不适用」与「查不到」混成一格 (仓规坑 ①)。
+    ...(convergedByCriteria
+      ? { zeroWrite: { checked: zeroWrite.checked, ...(zeroWrite.zero !== undefined ? { zero: zeroWrite.zero } : {}), ...(zeroWrite.why ? { why: zeroWrite.why } : {}) } }
+      : {}),
     ...(criterionRed ? { criterionRedCause: criterionRed.detail } : {}),
     ...(bestGreenFloor ? { bestGreenFloor } : {}),
     // INV-1: 否决从"物理销毁"降为"信息动作" —— 那条信息必须到得了人手上, 不能只活在引擎日志里。

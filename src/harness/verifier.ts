@@ -33,6 +33,7 @@ import { effectiveSeatSampling } from '../model/seat-overrides';
 import { withGoFallback } from '../model/gateway';
 import { logger } from './logger';
 import { engineFacts } from './plan/claimed-actions';
+import { renderDiffEvidence, type DiffEvidence } from './diff-evidence';
 import type { ModelUsage } from '../model/gateway';
 import type { ConductorPlan } from './conductor-plan';
 import type { LeafResult } from './dag/engine';
@@ -324,7 +325,23 @@ export function assertJudgingTruthsCarried(truths: JudgingTruths, paper: string)
   }
 }
 
-function verifierPrompt(task: string, summary: string, truths: JudgingTruths = {}): string {
+/**
+ * D-3 (2026-09-05): 盘上改动段的卷面写法。空串 = 没给 `artifactRoot` (卷面逐字节同旧, INV-6)。
+ *
+ * `empty` 且带 `why` = **取不到**, 不是零改动 —— 两者念成同一句就是给"什么都没做"发一份
+ * 产物证明 (仓规坑 ①: 分辨靠另一列)。
+ */
+export function renderDiffSection(evidence: DiffEvidence): string {
+  const head = '\n\n===== 盘上改动 (引擎 git diff 取, 不是自述) =====\n';
+  if (evidence.empty) {
+    return evidence.why
+      ? `${head}盘上改动取不到: ${evidence.why} —— 这一节没有证据, **不许**当成零改动来判\n`
+      : `${head}盘上零改动: 没有任何文件被改或新建 —— 任何"已完成"的自述都没有产物支撑\n`;
+  }
+  return `${head}${evidence.text}\n`;
+}
+
+function verifierPrompt(task: string, summary: string, truths: JudgingTruths = {}, diffSection = ''): string {
   return `你是一个**跨模型校验者**, 审一个多步任务的执行结果是否真正满足任务。你的职责是**攻击结果、找出它没满足任务的地方**, 而不是盖章放行 —— 默认怀疑, 证据不足时判不通过。
 
 判定**必须先做一步**: 从原始任务里抽出所有**明确要求** —— 步数、字数/篇幅、必须覆盖的子部分、必须标注的东西、格式、约束、应产出的体裁 (设计/分析/清单, 而非假装执行)。**逐条**对照结果。
@@ -340,7 +357,7 @@ function verifierPrompt(task: string, summary: string, truths: JudgingTruths = {
 证据来源 (SDD 2026-08-22 verifier-engine-facts, C-2): 本卷面里所有「引擎记录」段落的「执行命令」「exit N」「写入文件」「读取文件」行都是引擎观测值, **优于**本节点自述。
 - 引擎记录里已有的命令与退出码, **不必**再要求执行体复述 (那是冗余; 真值在卷面上)。
 - 执行体自述与引擎记录**冲突** ⇒ **以引擎记录为准, 且判不通过** (那正是谎报完成 —— 看见「执行命令: bun test (exit 1)」而自述写「全量 0 fail」就是这条; ⚠ 只写上一句 = 给假执行确认开了一道门, 必须两句齐下)。
-${renderJudgingTruths(truths)}
+${diffSection ? '- 「盘上改动」一节是引擎取的事实; 结果自述与它冲突时以它为准; 它为零改动而任务要求产出时判不通过。\n' : ''}${renderJudgingTruths(truths)}
 原始任务:
 ---
 ${task}
@@ -349,7 +366,7 @@ ${task}
 执行结果:
 ---
 ${summary}
----
+---${diffSection}
 
 打击对象 (pass=false 时**必须**声明): 同样是判不过, 「产出没做到」和「判据本身量不出」的下一步是相反的 —— 前者再开一轮修产出, 后者要去重建判据, 判错了就是烧空轮。
 - target="criterion" (判据错了 / 判据可被游戏): 判据是**恒绿**的 (不论产出成什么样都过)、能被 shim / 桩 / 空断言这类假实现骗绿、或判据命令指向不存在的路径 / 错的目录。一句话: **实装再对, 这条判据也量不出对错**。
@@ -415,6 +432,10 @@ export function createDefaultVerifier(opts: DefaultVerifierOpts): VerifierFn {
       return { pass: false, reason: '所有 leaf 执行失败 — 计划无产出', target: 'implementation', usage: { in: 0, out: 0 } };
     }
     const summary = summarizeResults(plan, results, artifactRoot);
+    // D-3 (2026-09-05): 卷面加**引擎自己取的** git diff。此前卷面 = task + 结果自述 + truths,
+    // 一个说"已完成"的 leaf 能同时过这道与 rubric 判官两道 —— 两道吃的是同一份自述。
+    // 没给 artifactRoot ⇒ 空串 ⇒ 卷面逐字节同旧 (INV-6, 老调用方零回归)。
+    const diffSection = artifactRoot ? renderDiffSection(renderDiffEvidence(artifactRoot)) : '';
     // A② GO fallback: verifierModel 走 opencode-go 端点溢出 → 回退 ds-v4-pro 官方 (跨模型校验不能因 GO 抖动整轮失败)。
     const r = await withGoFallback(opts.verifierModel, (m) =>
       call({
@@ -422,7 +443,7 @@ export function createDefaultVerifier(opts: DefaultVerifierOpts): VerifierFn {
         // #144 洞 1: 这一发此前**不带 role** → 落进 seat-usage 的 `(unattributed)` 桶,
         // 于是"verifier 到底烧了多少"结构上答不出来。标签原文即座位名。
         meta: { role: 'verifier' },
-        messages: [{ role: 'user', content: verifierPrompt(task, summary, paperTruths) }],
+        messages: [{ role: 'user', content: verifierPrompt(task, summary, paperTruths, diffSection) }],
         // 采样意图取自座位登记表 (model/seats.ts): 终审要**稳定** —— 同一份产出不该这次过下次不过。
         // C4: 座位采样经 config.seats 覆盖层 (无覆盖 = 编译期表逐字节同值)。
         ...effectiveSeatSampling('verifier'),

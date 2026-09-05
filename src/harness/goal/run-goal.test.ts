@@ -13,6 +13,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BOARD_TERMINAL_OUTCOME, boardTerminalEntry, goalSlug, runGoal, type RunGoalConfig } from './run-goal';
+import { TERMINAL_ZERO_WRITE } from './zero-write-gate';
 import type { AcceptanceSpec, GoalClassification, GoalTier } from './classify-acceptance';
 import type { ConductorPlan } from '../conductor-plan';
 import type { ExecutorDagConfig, ExecutorDagResult } from '../dag/types';
@@ -1223,7 +1224,10 @@ describe('runGoal — P4 设计审核集成 (INV-3 / INV-6 / G-4 / D-7)', () => 
     const r = await runGoal('做个事', drCfg({ changedFiles: [] }));
     expect(r.designReview!.scheduled).toBe(false);
     expect(r.designReview!.usage.in).toBe(0);
-    expect(r.converged).toBe(true);
+    // D-1 零写入闸 (2026-09-05) 之后, 空写集 = 盘上零改动 ⇒ 这趟本来就不算成。
+    // 本条要钉的是「设计审核不参与收敛判定」, 那句话仍然成立: 没收敛的成因是零写入闸, 不是审核。
+    expect(r.converged).toBe(false);
+    expect(r.terminalLabel).toBe(TERMINAL_ZERO_WRITE);
   });
 
   // ── INV-3: 审核失败/timeout → converged 与无审核逐位相同 ──────────────────

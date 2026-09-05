@@ -212,6 +212,23 @@ export function defaultSolveSpawn(cmd: string[], opts: SolveSpawnOpts): SolveSpa
   return { exited: proc.exited as Promise<number | null>, unref: () => proc.unref(), pid: proc.pid };
 }
 
+/**
+ * 从 resultOut 读终态字面 (第二行 `terminal: <label>`, D-2)。缺席 → undefined。
+ *
+ * ⚠ 缺席**不回落 outcome**: 那会让「旧格式 resultOut」与「终态字面恰好等于 outcome」
+ * 变成同一格, 事后再也分不开 (仓规坑 ①)。
+ */
+export function readTerminalLabel(resultOutPath: string): string | undefined {
+  if (!existsSync(resultOutPath)) return undefined;
+  try {
+    return /^terminal:\s*(\S+)/m.exec(readFileSync(resultOutPath, 'utf8'))?.[1];
+  } catch (e) {
+    // 吞异常不许吞证据 (仓规): 读失败的原文只有这里能留 —— 收尾行会印「缺席」。
+    process.stderr.write(`[omd solve] resultOut 读 terminal 行失败 (${resultOutPath}): ${(e as Error).message}\n`);
+    return undefined;
+  }
+}
+
 /** 从 resultOut 读 outcome kind (首行 `outcome: <kind>`)。缺失或无 outcome 行 → undefined。 */
 export function readOutcomeKind(resultOutPath: string): string | undefined {
   if (!existsSync(resultOutPath)) return undefined;
@@ -366,9 +383,12 @@ export async function runSolveCLI(args: string[], deps: SolveCliDeps = {}): Prom
 
   // D-4: 退出码 = 从 resultOut 机械读 outcome (worker 终局会写 `outcome: <kind>` 首部)。
   const outcome = readOutcomeKind(parsed.resultOut);
+  // D-2: 终态字面与 outcome **并排印** —— 「机器判过」与「机器没判据可判」此前在这一行上
+  // 长得一模一样, 而两者的下一步相反。缺席印「缺席」, 不拿 outcome 顶替。
+  const terminal = readTerminalLabel(parsed.resultOut);
   process.stderr.write(
     outcome
-      ? `omd solve: outcome=${outcome} · resultOut=${parsed.resultOut}\n`
+      ? `omd solve: outcome=${outcome} terminal=${terminal ?? '(缺席)'} · resultOut=${parsed.resultOut}\n`
       : `omd solve: resultOut 缺失或无 outcome 行 · resultOut=${parsed.resultOut}\n`,
   );
 

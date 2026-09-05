@@ -1453,7 +1453,11 @@ export function createGoalTool(deps: GoalToolDeps): OmdMcpTool {
               // criterion 两键) 都按键取, 多两键不碍。缺席 = 没记 (非循环路径 / recorder 缺席), 读侧不许当零。
               const loopLine = r.loop ? `loop: ${JSON.stringify(r.loop)}\n` : '';
               const ledgerLine = renderLedgerLine(deps.recorder, runId);
-              writeFileSync(resultOut, `outcome: ${r.outcome}\nrunId: ${runId}\nacceptance: ${r.acceptance.kind}\n${criterionLines}${loopLine}${ledgerLine}${autoCommitLine}\n${summarizeGoal(r)}`);
+              // D-2 (2026-09-05 假 success 三闸): `terminal:` 行排在 `outcome:` **之后** ——
+              // `outcome:` 一个字都不动 (pathfinder reflow 与 bench 读的是它), 归因细分走新的一行。
+              // 与 outcome 相同时也印: 机器读时不必判缺席 (缺席只该意味着"这份 resultOut 是旧格式")。
+              const terminalLine = `terminal: ${r.terminalLabel ?? r.outcome}\n`;
+              writeFileSync(resultOut, `outcome: ${r.outcome}\n${terminalLine}runId: ${runId}\nacceptance: ${r.acceptance.kind}\n${criterionLines}${loopLine}${ledgerLine}${autoCommitLine}\n${summarizeGoal(r)}`);
             } catch (e) {
               logger.warn({ err: (e as Error).message, resultOut }, '[dag_goal] resultOut 写失败 (回流将看不到这跑)');
             }
