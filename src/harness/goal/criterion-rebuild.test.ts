@@ -226,10 +226,31 @@ describe('INV-7 纯核: repoAnchorBlockReason —— 判据得锚在仓里, 不�
     expect(r).toContain('首词');
   });
 
-  test('★ 判别力: 首词对但一个仓内路径都没引 ⇒ 拒 (裸 `pytest -q` 锚不到任何东西)', () => {
-    const r = repoAnchorBlockReason('pytest -q', anchorOpts());
+  // ⚠ 本条 2026-09-06 由 owner 裁决**翻过来**: 首版要求"至少引一个仓内路径", 于是
+  // `pytest -q` / `bun test` 这类**整跑既有测试**的判据全被拒 —— 而那是 reward 最高的判据形态
+  // (dsw 批 0.683)。裸命令空不空是「空世界自检」那道门的问题, 本门不许越界替它答。
+  test('★ 裸命令 (整跑既有测试) ⇒ 过 —— 本门不替「空世界自检」回答空洞性', () => {
+    expect(repoAnchorBlockReason('pytest -q', anchorOpts())).toBeNull();
+    expect(repoAnchorBlockReason('bun test', anchorOpts({ envFacts: envFactsFor([]) }))).toBeNull();
+    expect(repoAnchorBlockReason('python3 -m pytest -q', anchorOpts())).toBeNull();
+  });
+
+  test('★ 判别力: 带了路径但那个路径不在 ls-files 里 ⇒ 拒 (幻觉路径恒红, 活干对了也过不了)', () => {
+    const r = repoAnchorBlockReason('pytest -q tests/ghost.py', anchorOpts());
     expect(r).not.toBeNull();
-    expect(r).toContain('仓内');
+    expect(r).toContain('tests/ghost.py');
+  });
+
+  test('★ 裸命令那一支压根不问 git —— 没有路径要核, 就没有"核不出来"这回事', () => {
+    let asked = 0;
+    const r = repoAnchorBlockReason('pytest -q', anchorOpts({ lsFiles: () => { asked++; return null; } }));
+    expect(r).toBeNull();
+    expect(asked).toBe(0);
+  });
+
+  test('★ `::` 测试 id 按它前面那个文件核 (pytest 的 node id 形态)', () => {
+    expect(repoAnchorBlockReason('pytest -q tests/test_x.py::test_foo', anchorOpts())).toBeNull();
+    expect(repoAnchorBlockReason('pytest -q tests/ghost.py::test_foo', anchorOpts())).not.toBeNull();
   });
 
   test('★ 图里声明的产物路径也算锚 (它还没被写出来, 但有节点说了会产它)', () => {

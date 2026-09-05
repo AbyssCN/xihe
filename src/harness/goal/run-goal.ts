@@ -1162,20 +1162,39 @@ export function criterionRebuildAdmission(
  * `.omd/` 下留的哨兵**, 与这个仓要做的事没有一点关系。判据一旦锚在引擎产物上, 执行体只要
  * 碰一下那个文件就赢, 而 oracle 全绿。
  *
- * ## 三条, 缺一即拒 (fail-closed, 与既有两道同款)
+ * ## 三条判据
  *
  *  ① 不许引 `.omd/` —— 那是引擎的地盘, 不是这个仓的内容;
  *  ② 首词必须是这个仓真跑得起来的测试 runner (`envFacts.testCommandCandidates` 的首词) 或
  *     {@link ANCHOR_BINS} 那八个;
- *  ③ 至少引一个 `git ls-files` 里的路径 (或目录), 或者图里声明会产出的产物路径。
+ *  ③ **有路径形参数时**, 至少一个要落在 `git ls-files` (含目录前缀) 或图里声明的产物集里;
+ *     一个路径形参数都没有的**裸命令直接过**。
  *
- * ⚠ `git ls-files` **算不出来就拒**, 不是放行: 这条判据是执行体家族提的, 拿不到"它真锚在仓里"
- * 的证明就不准冻结 (与 `criterionRebuildAdmission` 同一条纪律)。
+ * ## ③ 为什么对裸命令放行 (2026-09-06 owner 裁, 修的是本闸首版写紧了)
+ *
+ * 首版要求"至少引一个仓内路径", 于是 `pytest -q` / `bun test` / `python3 -m pytest -q` 这类
+ * **指向既有测试整跑**的判据全被拒。而那恰恰是 reward 最高的判据形态 (dsw 批 0.683) ——
+ * 它锚在整个仓的既有测试上, 比任何单文件判据都难被执行体游戏。
+ * 「裸命令会不会是空的」是**另一道门的问题**: 空世界自检问的正是"活还没干它就绿了吗",
+ * 恒真的裸命令在那里红。两道门各答各的, 本门不许越界替它答 (答了就是两份判据, 迟早漂)。
+ *
+ * ⚠ 有路径形参数时 `git ls-files` **算不出来就拒**, 不是放行: 这条判据是执行体家族提的,
+ * 拿不到"它真锚在仓里"的证明就不准冻结 (与 `criterionRebuildAdmission` 同一条纪律)。
+ * 裸命令那一支压根不问 git —— 没有路径要核, 就没有"核不出来"这回事 (NULL ≠ 不适用)。
  *
  * falsify (本闸必须能真红): 去掉 `.omd/` 那一条 ⇒ criterion-rebuild.test.ts 的
- * 「`.omd/` 哨兵 ⇒ 拒」当场绿转红; 去掉③ ⇒ 「裸 `pytest -q` ⇒ 拒」当场红。
+ * 「`.omd/` 哨兵 ⇒ 拒」当场绿转红; 把③的 `pathTokens.length === 0` 早返回删掉 ⇒
+ * 「裸 `pytest -q` ⇒ 过」当场红; 把③改成"有路径就过、不核 ls-files" ⇒
+ * 「`pytest -q tests/ghost.py` ⇒ 拒」当场红。
  */
 const ANCHOR_BINS: readonly string[] = ['pytest', 'python', 'python3', 'bun', 'npm', 'node', 'go', 'cargo'];
+
+/**
+ * 「这个 token 是不是一个路径形参数」—— 含 `/` · 以 `.py/.ts/.js/.go/.rs` 结尾 · 含 `::` 测试 id。
+ * 判宽了会把 `-q` 之外的普通实参当路径去核 (误拒); 判窄了会放过 `tests/ghost.py` 这类幻觉路径 (漏检)。
+ * 三条形态是**当前判据命令里真出现过的**那些, 不是穷举 —— 加形态时连同一条测试一起加。
+ */
+const LOOKS_LIKE_PATH_TOKEN = /\/|::|\.(py|ts|js|go|rs)$/;
 
 export function repoAnchorBlockReason(
   command: string,
@@ -1208,12 +1227,21 @@ export function repoAnchorBlockReason(
       `—— 判据要跑这个仓的测试, 不是拿别的命令验一个副作用。]`
     );
   }
-  // ③ 仓内锚点
+  // ③ 路径形参数在场时才核锚点; 裸命令 (整跑既有测试) 直接过。
+  const norm = (p: string): string =>
+    (p.split('\\').join('/').replace(/^\.\//, '').split('::')[0] ?? '').replace(/\/+$/, '');
+  const pathTokens: string[] = [];
+  for (const link of c.split('&&')) {
+    for (const token of link.trim().split(/\s+/).slice(1)) {
+      if (token.startsWith('-')) continue;
+      if (LOOKS_LIKE_PATH_TOKEN.test(token)) pathTokens.push(token);
+    }
+  }
+  if (pathTokens.length === 0) return null; // 裸整跑: 空洞与否由「空世界自检」那道门管, 不在这里越界替它答
   const tracked = (opts.lsFiles ?? (() => defaultLsFiles(opts.root)))();
   if (tracked === null) {
     return '[blocked repo-anchor: 算不出仓内文件清单 (不是 git 仓 / git 调不通) —— 拿不到"它锚在仓里"的证明就不准冻结 (fail-closed)]';
   }
-  const norm = (p: string): string => p.split('\\').join('/').replace(/^\.\//, '').replace(/\/+$/, '');
   const anchors = new Set<string>();
   for (const f of tracked) {
     const n = norm(f);
@@ -1227,15 +1255,11 @@ export function repoAnchorBlockReason(
     const n = norm(a);
     if (n) anchors.add(n);
   }
-  for (const link of c.split('&&')) {
-    for (const token of link.trim().split(/\s+/).slice(1)) {
-      if (token.startsWith('-')) continue;
-      if (anchors.has(norm(token))) return null;
-    }
-  }
+  if (pathTokens.some((t) => anchors.has(norm(t)))) return null;
   return (
-    `[blocked repo-anchor: 判据一个仓内路径都没引 —— \`git ls-files\` 里的路径 (或目录) 与图里声明的产物都没出现在命令里。` +
-    `一条不指向仓内任何东西的判据, 量的不是这个仓。]`
+    `[blocked repo-anchor: 判据点名了路径 ${pathTokens.join(' / ')}, 但它们一个都不在 \`git ls-files\` ` +
+    `(含目录) 与图里声明的产物集里 —— 这条判据指向的东西这个仓里没有, 恒红。` +
+    `要整跑既有测试就别带路径 (裸命令本门放行)。]`
   );
 }
 
