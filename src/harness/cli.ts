@@ -26,6 +26,8 @@
  * 值只是仓内路径, 换个路径对已安装的用户完全不可见。于是这里没有契约问题, 只有一个
  * 叫 `tui.ts` 却删光了 TUI 的文件 —— 本轮改名 `cli.ts`, 同目录, 相对 import 一个没动。
  */
+// ⚠ 必须是第一个 import: `--env-file` 要在 logger/bootstrap 读 .env **之前**生效(见该模块头)。
+import '../model/env-flag';
 import '../env-alias';
 import { randomUUID } from 'node:crypto';
 import { setCoreLogger } from './logger';

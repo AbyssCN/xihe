@@ -14,6 +14,7 @@
  * (`envSummaryLine`,与告警共用同一份,不许各拼各的)。判嗓门的判据见 `shouldWarnEnv` 的注。
  */
 import '../env-alias';
+import { loadDiscoveredEnv } from './env-discovery';
 import { registerProvidersFromEnv, registerProvidersFromModelsJson } from './providers';
 import { warnUnregisteredRoles } from './role-fallback';
 import { readConfigPath } from './role-models';
@@ -23,6 +24,11 @@ import { readConfigPath } from './role-models';
  * @returns 注册的 provider 名数组。
  */
 export function bootstrapModelRuntime(): string[] {
+  // ⓪ 先把**能找到的** .env 灌进 process.env (2026-09-05)。Bun 只自动加载 cwd 那份, 于是
+  //    `cd` 到任何别的仓跑 omd 就 `providers=[⚠空]` —— 整个 run 烧完才失败 (实账 3e572428,
+  //    26m16s 零产出)。发现链与优先序见 model/env-discovery 模块头; 不覆盖已存在的键,
+  //    所以仓内那份永远赢。必须排在 registerProvidersFromEnv() 之前 —— 它读的就是 process.env。
+  loadDiscoveredEnv();
   const registered = registerProvidersFromEnv();
   // ~/.pi/agent/models.json 自定 provider (统一-registry D-2): 于 env 之后 → 单一真源, 同名覆盖。
   const fromModelsJson = registerProvidersFromModelsJson();
