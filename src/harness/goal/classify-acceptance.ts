@@ -312,7 +312,30 @@ function consensusEnabled(): boolean {
 }
 
 /** 坐标的 provider 前缀 (`claude-code:` / `openai-codex:` / `minimax-cn:` …)。同 provider 视为同族。 */
-function providerOf(coord: string): string {
+/**
+ * 模型家族 —— 按**模型 id** 认, 不按 provider 前缀。
+ *
+ * 2026-09-06 code80-m3-consensus 实测: 79/79 题 `crossFamily=false`, 异族座一份都没采到。
+ * bench 里所有模型都挂在同一个 `bench:` provider 下 (`bench:MiniMax-M3` / `bench:claude-opus-5`),
+ * 按前缀比它们就是"同族"。家族是模型的属性, 不是路由的属性; 前缀只在 id 认不出时兜底。
+ */
+export function familyOf(coord: string): string {
+  const id = (coord.includes(':') ? coord.slice(coord.indexOf(':') + 1) : coord).toLowerCase();
+  const table: [RegExp, string][] = [
+    [/claude|anthropic|opus|sonnet|haiku|fable/, 'anthropic'],
+    [/\bgpt|o[1-9]-|codex|openai/, 'openai'],
+    [/minimax|\bm[23]\b/, 'minimax'],
+    [/deepseek/, 'deepseek'],
+    [/glm|zhipu/, 'zhipu'],
+    [/kimi|moonshot/, 'moonshot'],
+    [/qwen|alibaba/, 'alibaba'],
+    [/mimo|xiaomi/, 'xiaomi'],
+    [/gemini|google/, 'google'],
+    [/grok|xai/, 'xai'],
+    [/llama|meta/, 'meta'],
+    [/mistral/, 'mistral'],
+  ];
+  for (const [re, fam] of table) if (re.test(id)) return fam;
   return coord.split(':')[0] ?? coord;
 }
 
@@ -322,10 +345,10 @@ function providerOf(coord: string): string {
  * (同族自审复用同一个盲点, 凑出来的第三票是一张假票。)
  */
 function crossFamilyModel(coord: string): string | undefined {
-  const family = providerOf(coord);
+  const family = familyOf(coord);
   for (const seat of ['verifier', 'escalation'] as const) {
     const m = tryResolveSeatModel(seat)?.model.trim();
-    if (m && providerOf(m) !== family) return m;
+    if (m && familyOf(m) !== family) return m;
   }
   return undefined;
 }

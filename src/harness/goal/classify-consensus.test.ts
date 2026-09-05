@@ -122,6 +122,17 @@ describe('D-1 采样面 —— conductor 两发 + 异族座一发', () => {
     expect(c.criterionConsensus?.crossFamily).toBe(true);
   });
 
+  test('bench 同 provider 前缀但模型异族 (bench:MiniMax-M3 vs bench:claude-opus-5) ⇒ 异族成立 —— 按前缀判则本用例红 (code80-m3-consensus 实测 79/79 crossFamily=false)', async () => {
+    withSwitch('1');
+    setRoleModel('verifier', 'bench:claude-opus-5');
+    setRoleModel('escalation', 'bench:MiniMax-M3');
+    const { generate, calls } = scripted([execJson('bun test src/a.test.ts')]);
+    const c = await classifyGoal('给 foo 加校验', { generate, model: 'bench:MiniMax-M3' });
+
+    expect(calls.map((x) => x.model)).toEqual(['bench:MiniMax-M3', 'bench:MiniMax-M3', 'bench:claude-opus-5']);
+    expect(c.criterionConsensus?.crossFamily).toBe(true);
+  });
+
   test('一发挂了 ⇒ 该候选缺席且**不重试** (总调用数仍是 3, n=2)', async () => {
     withSwitch('1');
     setRoleModel('verifier', 'openai-codex:gpt-5.6-sol');
