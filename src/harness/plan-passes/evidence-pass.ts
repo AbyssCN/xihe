@@ -30,6 +30,7 @@
  */
 import type { AgentTemplate } from "../agent-templates";
 import type { ConductorPlan } from "../conductor-plan";
+import { describeRenderProbe, type RenderProbe } from "./render-command";
 
 type PlanNode = ConductorPlan["nodes"][string];
 
@@ -76,7 +77,16 @@ export interface EvidencePassResult {
  */
 export function evidencePass(
 	plan: ConductorPlan,
-	opts: { templates: Map<string, AgentTemplate> },
+	opts: {
+		templates: Map<string, AgentTemplate>;
+		/**
+		 * 本仓怎么渲染自己 (2026-09-05, `plan-passes/render-command` 探)。
+		 * 有**显式声明**时, 非 HTML 交付物也接得出像素证据链 —— 组件化的仓 (`.tsx`/`.vue`/`.svelte`)
+		 * 此前一律走 EVD-5 降级, 品味审查只看得到 diff 看不到像素。
+		 * 缺省 undefined = 保持原行为 (纯函数, 探测在接线层做, 同 INV-8)。
+		 */
+		render?: RenderProbe;
+	},
 ): EvidencePassResult {
 	const ids = Object.keys(plan.nodes);
 	const shape = shapeOf(plan);
@@ -98,7 +108,7 @@ export function evidencePass(
 	const degraded: EvidencePassResult['degraded'] = [];
 	for (const id of hits) {
 		if (hasEvidenceChain(nodes, id)) continue;
-		const r = patchChain(nodes, id);
+		const r = patchChain(nodes, id, opts.render);
 		if (r.degradedReason) degraded.push({ id, reason: r.degradedReason });
 		else patched.push(...r.ids);
 	}
@@ -151,17 +161,27 @@ function descendantsOf(nodes: ConductorPlan["nodes"], id: string): string[] {
  * 渲染目标取该节点声明的 output_path (须是可渲染后缀) —— 取不到就没有可截图的东西,
  * 抛错拒 plan (D-2: 采集是地板; 与其挂一个必然失败的命令假装有证据链, 不如让 owner/conductor 补 output_path)。
  */
-function patchChain(nodes: ConductorPlan["nodes"], id: string): { ids: string[]; degradedReason?: string } {
+function patchChain(
+	nodes: ConductorPlan["nodes"],
+	id: string,
+	render?: RenderProbe,
+): { ids: string[]; degradedReason?: string } {
 	const node = nodes[id]!;
 	const target = node.output_path;
 	if (!target || !RENDERABLE_EXT.test(target)) {
+		// EVD-6 (2026-09-05): 无 HTML 目标但**仓显式声明了渲染命令** → 用它接链, 不再降级。
+		// 组件化的仓 (.tsx/.vue/.svelte) 此前 100% 走 EVD-5, 于是品味审查只看得到 diff ——
+		// 那一格是静默的 (实账 plana: design-review 节点挂上来了却 attach_media 无可用媒体)。
+		// ⚠ 只认**显式声明**: 探测到的候选不带 outDir, 猜错落点会让 omd-shots-verify 假红,
+		//   而一条必然失败的命令比没有命令更坏 —— 它把"没证据"伪装成"证据是红的"。
+		if (render?.command) return patchWithRepoRender(nodes, id, render.command);
 		// EVD-5: 无可渲染目标 → **降级为 diff-only 审**, 不再拒整张 plan (理由见 EvidencePassResult.degraded)。
-		// 想要像素证据的项目, 修法仍是: 给该节点声明 .html 产物的 output_path,
-		// 或显式画出 [executor:'command' 渲染节点 → 跑 omd-shots-verify 的 command 节点] 后代链。
+		// 判词带上探测结果 —— 让"为什么没有像素"变成一句照着做就能修的话, 而不是一句现象描述。
 		return {
 			ids: [],
 			degradedReason:
-				`无可渲染目标 (output_path=${target ?? "(未声明)"}) —— 像素证据链缺席, 本节点退化为 diff-only 审`,
+				`无可渲染目标 (output_path=${target ?? "(未声明)"}) —— 像素证据链缺席, 本节点退化为 diff-only 审。` +
+				(render ? ` ${describeRenderProbe(render)}` : ""),
 		};
 	}
 	const renderId = freshId(nodes, `${id}-render`);
@@ -181,6 +201,33 @@ function patchChain(nodes: ConductorPlan["nodes"], id: string): { ids: string[];
 	};
 	nodes[renderId] = renderNode;
 	nodes[verifyId] = verifyNode;
+	return { ids: [renderId, verifyId] };
+}
+
+/**
+ * 用**仓自己声明的**渲染命令接链 (EVD-6)。与 patchChain 的 HTML 分支同形状, 只是渲染那步换成仓的命令、
+ * 截图落点换成仓声明的 outDir —— omd-shots-verify 仍是同一道零模型闸 (它才是地板)。
+ */
+function patchWithRepoRender(
+	nodes: ConductorPlan["nodes"],
+	id: string,
+	render: { command: string; outDir: string; provenance: string },
+): { ids: string[] } {
+	const renderId = freshId(nodes, `${id}-render`);
+	const verifyId = freshId(nodes, `${id}-shots-verify`);
+	nodes[renderId] = {
+		goal: `跑本仓声明的渲染命令产截图 (来源 ${render.provenance}; 证据采集步, 由 evidence-pass 补挂)`,
+		executor: "command",
+		command: render.command,
+		depends_on: [id],
+	};
+	nodes[verifyId] = {
+		goal: `校验 ${render.outDir} 下的截图真存在、非空、不是白板 (确定性证据闸, 零模型, 由 evidence-pass 补挂)`,
+		executor: "command",
+		command: `bun run scripts/${SHOTS_VERIFY_CLI}.ts ${render.outDir}`,
+		depends_on: [renderId],
+		requires: "all",
+	};
 	return { ids: [renderId, verifyId] };
 }
 

@@ -63,6 +63,7 @@ import { prunePass } from '../harness/plan-passes/prune-pass';
 import { dedupPass } from '../harness/plan-passes/dedup-pass';
 import { stampPass } from '../harness/plan-passes/stamp-pass';
 import { evidencePass } from '../harness/plan-passes/evidence-pass';
+import { describeRenderProbe, detectRenderCommand } from '../harness/plan-passes/render-command';
 import { triggerPass } from '../harness/plan-passes/trigger-pass';
 import { loadAgentTemplates } from '../harness/agent-templates';
 import { modelFamily } from '../model/channels';
@@ -699,8 +700,16 @@ export function assembleOmdMcpTools(deps: AssembleOmdMcpDeps = {}): OmdMcpTool[]
       // 本 pass 会新增节点, 排在 stamp 后补挂的 attach_media 审查 leaf 拿不到多模态池模型 = 白补
       // (回流修正 SDD 的「链尾」写法, 理由见 evidence-pass.ts 文件头)。卡按调用时刻读盘 (与执行器同源)。
       (p) => {
-        const { plan, patched, noCardHits, shape, degraded } = evidencePass(p, { templates: loadAgentTemplates({ root: cwd }) });
+        // 本仓怎么渲染自己 (EVD-6, 2026-09-05): 有**显式声明**时组件化的仓也接得出像素证据链;
+        // 只探到候选时不接 (猜 outDir 会让 shots-verify 假红), 但把建议带进降级判词。
+        const render = detectRenderCommand(cwd);
+        const { plan, patched, noCardHits, shape, degraded } = evidencePass(p, {
+          templates: loadAgentTemplates({ root: cwd }),
+          render,
+        });
         if (patched.length) logger.info({ patched }, '[omd/mcp] evidence pass: 补挂 ui-pixels 证据链 (S2/D-2)');
+        // 渲染能力是**每仓不同**的一格, 读的人要看得见这次用的是哪条、为什么 (同 toolchain 那条纪律)。
+        logger.info({ render: describeRenderProbe(render) }, '[omd/mcp] evidence pass: 本仓渲染能力');
         // EVD-5 降级必须响亮: fail-open 可以吞异常, 不许吞证据。读的人要看得见"这一格没有像素证据",
         // 而不是以为它过了闸 —— 静默降级与"闸压根没跑"在读数上不可分, 那正是本仓坑 #2 的形状。
         if (degraded.length)
