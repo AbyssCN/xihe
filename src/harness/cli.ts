@@ -1,9 +1,11 @@
 #!/usr/bin/env bun
 /**
- * omd CLI 入口 —— 两个子命令, 零 UI。
+ * omd CLI 入口 —— **主入口** (owner 2026-09-05: CLI 是主入口, MCP 与 TUI 是同一引擎的两个前端)。
  *
- *   omd mcp     # stdio MCP server (**主入口**: Claude Code 等 MCP 客户端 spawn 它)
+ *   omd mcp     # stdio MCP server (Claude Code 等 MCP 客户端 spawn 它)
  *   omd init    # 首次配置向导 (纯 readline, 写 .env)
+ *   omd tui     # 自建 TUI (独立 agent 产品面, 给没有 Claude 的用户; 保留)
+ *   其余 (run / solve / status / doctor / map / memory / config / call …) 见 `omd --help`, 由 registry 表生成。
  *
  * ## 切片 6 (2026-09-05) — registry 接线
  *
