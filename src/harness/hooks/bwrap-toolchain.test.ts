@@ -24,8 +24,8 @@
  * ⚠ 宿主 PATH 上没有 node → ① 这组**跳过并响亮说明**,不静默绿(同 bwrap-containment 的纪律)。
  */
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { bwrapArgs, collectNodeModules, defaultRoBinds, findNodeToolchain } from './bwrap';
@@ -170,5 +170,45 @@ describe('① node 工具链进 jail —— PATH 与绑定', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// ── 订阅座位的凭据进 jail (2026-09-05, run 8976c8be 实账) ─────────────────
+/**
+ * 病:隔离档下 `jailRoot` **不看座位** —— 所有叶子(含 conductor)都进 jail,而 jail 的
+ * `HOME=/tmp` ⇒ `~/.claude` 不可见 ⇒ 订阅通道 `Not logged in · Please run /login`,节点抛错。
+ * `agent-leaf.ts:2055` 早写着「订阅座位暂不支持沙箱叶」,而生产路径照进。
+ *
+ * ⚠ 本组最该钉的是**挂载面有多窄**:三轮收窄实测(整个 `~/.claude` → 加 `~/.claude.json` →
+ * 只要凭据一件,三次 `claude -p` 都回 OK)。挂整个 `~/.claude` 会把 `projects/` 下所有仓
+ * 所有会话的完整记录递给一个 LLM 叶子。放宽这一条要重新拿实测说话。
+ */
+describe('claudeCredentials —— 订阅座位在 jail 里认得出自己', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'omd-cred-')));
+  const cred = join(homedir(), '.claude', '.credentials.json');
+
+  test('缺席(默认)→ 一个 .claude 的绑定都没有(零回归)', () => {
+    const srcs = bindSources(bwrapArgs(root, []));
+    expect(srcs.some((s) => s.includes('/.claude'))).toBe(false);
+  });
+
+  // 证伪方式: 把 bwrapArgs 里 `opts.claudeCredentials` 那一支删掉 → 本条红。
+  test('★ 开启 → 凭据 ro 挂到 jail 的 HOME 下(/tmp/.claude/.credentials.json)', () => {
+    if (!existsSync(cred)) {
+      console.warn('[skip] 宿主上没有 ~/.claude/.credentials.json —— 本条跳过, 不是通过');
+      return;
+    }
+    const argv = bwrapArgs(root, [], { claudeCredentials: true });
+    const i = argv.findIndex(
+      (a, k) => a === '--ro-bind' && argv[k + 1] === cred && argv[k + 2] === '/tmp/.claude/.credentials.json',
+    );
+    expect(i).toBeGreaterThanOrEqual(0);
+  });
+
+  // 这一条是**安全断言**, 不是功能断言: 放宽挂载面会让它红。
+  test('★ 只挂凭据那一个文件 —— 不挂 ~/.claude 目录(那里有所有仓的会话记录)', () => {
+    const srcs = bindSources(bwrapArgs(root, [], { claudeCredentials: true }));
+    const claudeish = srcs.filter((s) => s.includes('/.claude'));
+    for (const s of claudeish) expect(s.endsWith('.credentials.json')).toBe(true);
   });
 });

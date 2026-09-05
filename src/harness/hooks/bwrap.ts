@@ -180,6 +180,19 @@ export interface BwrapOpts {
   piAgentCopy?: string;
   /** {@link resolveGitBinds} 的产物 — 给了才把 git 元数据挂进视图 (见那里的取舍)。 */
   gitBinds?: GitBinds;
+  /**
+   * claude-code 订阅座位: 把**凭据单文件** ro 挂进 jail。
+   *
+   * 治的病 (2026-09-05 实账): 隔离档下 `jailRoot` 不看座位, **所有**叶子都进 jail, 而 jail 的
+   * `HOME=/tmp` ⇒ `~/.claude` 不可见 ⇒ 订阅通道 `Not logged in · Please run /login`, 节点抛错。
+   * (`agent-leaf.ts:2055` 早写着"订阅座位暂不支持沙箱叶", 而生产路径照进 —— 这条就是补上它。)
+   *
+   * ⚠ **只挂 `.credentials.json` 这一个文件**, 实测足够认证 (三轮收窄: 整个 `~/.claude` →
+   * 加 `~/.claude.json` → 只要凭据一件, 三次 `claude -p` 都回 OK)。
+   * 挂整个 `~/.claude` 会把 `projects/` 下**所有仓所有会话的完整记录**递给一个 LLM 叶子 ——
+   * 那是真实的外泄面, 不是洁癖。jail 内 `/tmp/.claude` 其余部分留 tmpfs 可写, 会话写入即弃。
+   */
+  claudeCredentials?: boolean;
 }
 
 /** worktree 的 git 元数据位置: 本树自己的 gitdir (rw) + 共享的 common dir (ro)。 */
@@ -281,6 +294,12 @@ export function bwrapArgs(root: string, roBinds: string[], opts: BwrapOpts = {})
   // 限制外泄面, 引擎不替 owner 决定把哪些密钥递进沙箱)。
   const repoEnv = resolveRepoEnv(root);
   for (const h of repoEnv.homeBinds) args.push('--ro-bind', h.src, h.dest);
+  // 订阅座位的凭据单文件 (见 BwrapOpts.claudeCredentials 的 ⚠)。不在盘上就不挂 —— 缺凭据的
+  // 报错该由通道自己说, 不该变成一句 bwrap 的 "no such file" 把方向带偏。
+  if (opts.claudeCredentials) {
+    const cred = join(homedir(), '.claude', '.credentials.json');
+    if (existsSync(cred)) args.push('--ro-bind', cred, '/tmp/.claude/.credentials.json');
+  }
   args.push('--chdir', root);
   // pi agent dir 分层挂载 (2026-07-25 三轮实证): HOME=/tmp 后 worker 缺 /tmp/.pi/agent →
   // 注册制 provider (mimo-platform/opencode-go/…) 全消失, leaf 全军覆没 leafTokens=0。

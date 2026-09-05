@@ -11,6 +11,7 @@ import { dirname, join, resolve } from 'node:path';
 import { logger } from '../../logger';
 import type { AgentLeafInput, AgentLeafResult, AgentLeafRunner } from '../leaf-runners';
 import type { AgentLeafRunnerOpts } from '../agent-leaf';
+import { CLAUDE_SDK_PROVIDER } from '../../model/claude-sdk-complete';
 import type { LeafWorkerPayload } from '../leaf-worker';
 import type { AnyOmdTool } from '../agent-tools';
 import { bwrapArgs, defaultRoBinds, makePiAgentCopy, resolveGitBinds, type GitBinds } from './bwrap';
@@ -235,7 +236,13 @@ export function createSandboxedLeafRunner(opts: AgentLeafRunnerOpts): AgentLeafR
     // bwrap [binds] bun run <worker> <payloadRel> <resultRel> —— 相对路径, cwd=worktree (bwrap --chdir)。
     const argv = [
       'bwrap',
-      ...bwrapArgs(root, roBinds, { ...(piAgentCopy ? { piAgentCopy } : {}), ...(gitBinds ? { gitBinds } : {}) }),
+      ...bwrapArgs(root, roBinds, {
+        ...(piAgentCopy ? { piAgentCopy } : {}),
+        ...(gitBinds ? { gitBinds } : {}),
+        // 订阅座位进 jail 要带凭据 —— 隔离档下 jailRoot 不看座位, conductor 也是沙箱叶
+        // (实账 run 8976c8be: `Not logged in · Please run /login` 直接把节点打成 failed)。
+        ...(input.model.startsWith(`${CLAUDE_SDK_PROVIDER}:`) ? { claudeCredentials: true } : {}),
+      }),
       'bun',
       'run',
       workerPath,
