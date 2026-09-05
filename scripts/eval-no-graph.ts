@@ -173,6 +173,7 @@ async function runArmB(t: string, p: number): Promise<void> {
 async function runArmA(t: string, p: number): Promise<void> {
   const { assembleOmdMcpTools } = await import('../src/mcp/assemble');
   const { RunRegistry } = await import('../src/mcp/run-registry');
+  const { createRunStore } = await import('../src/mcp/run-store');
   const { resolveEngineModels } = await import('../src/mcp/assemble');
   const { bootstrapModelRuntime } = await import('../src/model/bootstrap');
   bootstrapModelRuntime();
@@ -184,7 +185,10 @@ async function runArmA(t: string, p: number): Promise<void> {
   // 便不再写, 评分评到了旧引擎的答案 (Langfuse ed4dbe39: "Existing … prior run, 16:50")。
   // 重跑必须从空白开始, 否则"分数"量的是磁盘残留不是本跑。
   rmSync(answerFile, { force: true });
-  const registry = new RunRegistry();
+  // 2026-09-05 修: S2 执行进程化 (08-10) 之后 dag_run 在**子进程**里跑, 终态写进 <workCwd>/.omd/runs.db;
+  // 一个没有 store 的内存 registry 永远看不到它 —— 实测 f1-a-4 子进程 9 分钟 done, 本脚本等了 3.5 小时。
+  // 修法 = 与 assemble.ts:435 同一份构造 (带 store), 轮询走 getRecord ?? ensureFromDisk (与 dag_status 同一条读路)。
+  const registry = new RunRegistry(undefined, { store: createRunStore({ path: join(workCwd, '.omd', 'runs.db') }) });
   const tools = assembleOmdMcpTools({ cwd: workCwd, runRegistry: registry });
   const toolName = engine === 'solve' ? 'dag_goal' : 'dag_run';
   const tool = tools.find((x) => x.name === toolName)!;
@@ -196,20 +200,22 @@ async function runArmA(t: string, p: number): Promise<void> {
   const runId = /runId: (\S+)/.exec(res.content[0]?.text ?? '')?.[1];
   if (!runId || res.isError) throw new Error(`A 臂起跑失败: ${res.content[0]?.text}`);
   const TERMINAL = new Set(['done', 'failed', 'cancelled']);
+  const statusOf = (): string | null => (registry.getRecord(runId) ?? registry.ensureFromDisk(runId))?.status ?? null;
   for (;;) {
-    const st = registry.getStatus(runId);
+    const st = statusOf();
     if (st && TERMINAL.has(st)) break;
     await Bun.sleep(3000);
   }
+  const finalStatus = statusOf();
   mkdirSync(join(cwd, OUT_DIR), { recursive: true });
   writeFileSync(
     outPath(t, armKey('a'), p),
     `arm: ${armKey('a')} (omd ${toolName})\nseat: ${(seats.agentLeafModel ?? seats.leafModel)}\n` +
       `task: ${t} pair: ${p} engine: ${engine}\n` +
-      `wallMs: ${Date.now() - started}\nrunId: ${runId}\nstatus: ${registry.getStatus(runId)}\nworkDir: ${workCwd}\n` +
+      `wallMs: ${Date.now() - started}\nrunId: ${runId}\nstatus: ${finalStatus}\nworkDir: ${workCwd}\n` +
       `answerFile: ${answerFile}\n`,
   );
-  console.log(`a 臂完成: ${outPath(t, armKey('a'), p)} (${registry.getStatus(runId)})`);
+  console.log(`a 臂完成: ${outPath(t, armKey('a'), p)} (${finalStatus})`);
 }
 
 /**
