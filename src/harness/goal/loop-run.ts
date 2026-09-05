@@ -122,17 +122,22 @@ export function withLoopConfig(
     return (host.runDag ?? runExecutorDagWithPlan)(childPlan, childCfg);
   };
   const budgetMs = base.loopBudget?.ms;
-  // 1-A (2026-09-03): 判据引用、此刻不存在的文件 → conductor 第一个派发只准写它们, 之后冻结 (闸在 orchestrating-loop)。
+  // 1-A (2026-09-03; 2026-09-05 只留边界): 判据引用、此刻不存在的文件 —— 它们一旦被写出就冻结
+  // (hash 记账, 之后任何派发改它们都会被工具闸拒); 先勘察还是先写判据由 conductor 定 (闸在 orchestrating-loop)。
   // 回灌第二跑时文件已存在 → 这里算出 [], 但 ledger.criterionFreeze 里已有 hashes → 工具面从那里恢复保护 (initFreezeState)。
   //
   // 逃生口 `OMD_CRITERION_FREEZE=0` (2026-09-05, 引擎回归定位实验): 关掉整个 1-A ——
-  // criterionFiles 恒空 ⇒ 不强制第一发写集、不拒非单节点 work()、不锁判据文件。
+  // criterionFiles 恒空 ⇒ 判据文件不冻结、之后的派发不走路径禁令。
   //
   // 为什么需要它: dsw/dswr (5458fd4a **之前**, 无 1-A) 0.740; p6/dsc (之后) 0.610/0.659,
   // 同座位同题集差 0.081 (2.3σ)。而 1-A 恰恰规定了「第一步必须做什么」, 与 §引擎理念 ②
   // 「边界之内引擎不规定怎么做」相悖; 同批实测判据方向性 green-before 7 题 reward 仅 0.212 ——
   // 判据方向本就不可靠, 1-A 却把整场锁死在第一步写出来的那个判据上。
   // 这是**可证伪假设**, 不是结论: 关掉后若仍 ~0.66, 说明 1-A 不是那 0.081 的主因, 回去二分。
+  //
+  // 读数回来了 (2026-09-05, 单变量同座位同题集): code80-dsc (开) 0.6592 vs code80-nofreeze (关) 0.7189,
+  // 差 0.060 / 1.7σ (sd 0.0346)。据此砍掉 1-A 里「规定怎么做」的两条 (首发必须是一张 work() · 首发写集强制),
+  // 只留边界那一条 (判据文件写出即冻结, 之后不可改)。本逃生口语义不变: `=0` 仍是关全部。
   //
   // ⚠ 默认恒开 —— 只有显式 `=0` 才关, 其余取值 (含缺席/空串/'1') 一律照旧, 存量行为逐字节不变。
   const freezeOff = process.env.OMD_CRITERION_FREEZE?.trim() === '0';

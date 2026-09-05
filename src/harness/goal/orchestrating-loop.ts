@@ -296,7 +296,7 @@ function toTypebox(schema: z.ZodType): ReturnType<typeof Type.Unsafe> {
 interface FreezeState {
   files: string[];
   root: string;
-  /** 已冻住 (≥1 个文件在派发后存在)。冻住之前每次派发都强制写集; 冻住之后每次派发都走路径禁令。 */
+  /** 已冻住 (≥1 个文件在派发后存在)。冻住之前每次派发回来都查一次盘; 冻住之后每次派发都走路径禁令。 */
   frozen: boolean;
   protectedFiles: string[];
 }
@@ -390,20 +390,11 @@ function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () 
           return { content: [{ type: 'text', text }], details: { ok: false, card: card.name, coordRejected: coordFindings.length } };
         }
       }
-      // 1-A: 冻住之前, 第一个派成的派发必须是一张 work() 单独产出判据文件 —— 写集被强制为这些文件 (闸, 不是提示)。
-      let compiledPlan = compiled.plan;
-      if (freeze && !freeze.frozen) {
-        const ids = Object.keys(compiledPlan.nodes);
-        if (card.name !== 'work' || ids.length !== 1) {
-          if (ledger) ledger.rejectedCompile++;
-          const text =
-            `[1-A 判据先落盘] 判据引用的文件还不存在: ${freeze.files.join(', ')}。第一个派发必须是**一张 work()** 单独把它们写出来 ` +
-            `(写集 = 这些文件), 引擎随后冻结它们; 你派的是 ${card.name} × ${ids.length} 节点, 已拒。先派 work() 写判据文件, 再派实装。`;
-          return { content: [{ type: 'text', text }], details: { ok: false, card: card.name, criterionFreeze: 'first-dispatch-rejected' } };
-        }
-        const only = ids[0]!;
-        compiledPlan = { ...compiledPlan, nodes: { [only]: { ...compiledPlan.nodes[only]!, write_set: [...freeze.files] } } } as ConductorPlan;
-      }
+      // 1-A (2026-09-05 只留边界): 冻住**之前**引擎不管做法 —— 不拒非单节点 work(), 也不改写集。
+      // 砍掉的两条 (① 首发必须是一张 work() ② 首发写集强制成判据文件) 是「规定怎么做」, 与
+      // §引擎理念 ② 相悖; 单变量对照 code80-dsc (开) 0.6592 vs code80-nofreeze (关) 0.7189。
+      // 留下的是边界那一半: 判据文件一旦写出即冻结, 之后谁都不许改 (见下面的冻结块 + withProtected)。
+      const compiledPlan = compiled.plan;
       const n = nextSeq();
       const label = `dispatch d${n} (${card.name})`;
       let plan = prefixPlanIds(compiledPlan, `d${n}`);
@@ -442,7 +433,8 @@ function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () 
         return { content: [{ type: 'text', text: `[${label} · 引擎抛错, 未产出]\n${msg}` }], details: { ok: false, card: card.name, seq: n, error: msg } };
       }
       for (const r of Object.values(exec.results)) priorById.set(r.id, r);
-      // 1-A: 第一个派成的派发回来 → 记 hash 冻结 (存在的那些); 一个都没写出来 = 没冻住, 下一次派发继续强制。
+      // 1-A: **每次**派发回来都查 → 判据文件在盘上了就记 hash 冻结 (存在的那些);
+      // 一个都没写出来 = 没冻住, 下一次派发回来再查 (冻结点 = 任一派发回来后判据文件在盘上了)。
       let freezeNote = '';
       if (freeze && !freeze.frozen) {
         const hashes: Record<string, string | null> = {};
@@ -452,7 +444,7 @@ function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () 
         if (ledger) ledger.criterionFreeze = { files: [...freeze.files], ...(freeze.frozen ? { frozenAtDispatch: n, hashes } : {}) };
         freezeNote = freeze.frozen
           ? `\n[1-A 判据文件已冻结: ${freeze.files.map((f) => `${f} ${hashes[f] ? `(${hashes[f]})` : '(仍不存在 — 没冻住, 判据对它仍恒红)'}`).join(' · ')}; 之后的派发不得改它们 (工具写当场拒)]`
-          : `\n[1-A 判据文件一个都没写出来 (${freeze.files.join(', ')}); 下一个派发仍必须是单独写它们的 work()]`;
+          : `\n[1-A 判据文件仍未写出: ${freeze.files.join(', ')}; 它们一旦被写出即冻结, 之后不可改]`;
         logger.info({ seq: n, hashes, frozen: freeze.frozen }, '[orchestrating-loop] 1-A 判据文件冻结');
         // ── #205 方向性探针 (2026-09-04) ────────────────────────────────────────
         //
@@ -465,6 +457,11 @@ function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () 
         //
         // fail-open 三层: 只在冻住了 (文件真写出来) + 有可跑判据时才跑; 抛错吞掉但留证据;
         // 结论只进账本, **不翻终态、不拦派发** (「改动前绿 ⇒ 方向错」零真实样本支撑, 先量再拦)。
+        //
+        // 2026-09-05 (只留边界): 去掉 ① 之后 red-before 的含义不变, green-before 多了一种成因 ——
+        // 同一发里实装已经做完, 判据自然就绿。所以它是**重建触发**, 不是失败判定
+        // (run-goal `shouldRebuildCriterion` 的 criterionDirection 入口)。探针位置不变: 这仍是
+        // 「判据文件存在 + 实装可能未做」的唯一时刻。
         if (freeze.frozen && deps.ctx.acceptance && ledger) {
           try {
             const dv = await probeCriterionDirection(

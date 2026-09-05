@@ -122,6 +122,38 @@ describe('INV-4 纯核: shouldRebuildCriterion —— 两条触发路 + 一次�
   });
 });
 
+// ── 路 ③: #205 方向性探针 green-before (2026-09-05, 契约 D-5) ────────────────────
+//
+// 同批读数: `green-before` (判据在改动前就绿) 7 题 reward 均值 0.212, 全批 0.610, 假阳性 1/7。
+// 它此前只记账不动作; 现在升成**重建触发**, 仍不判失败、不拦派发 —— 判据在改动前就绿, 说明它量的
+// 不是本次目标, 该去改判据而不是再烧修复轮。
+describe('INV-5 (2026-09-05): criterionDirection green-before ⇒ 重建', () => {
+  test('★ green-before 单独就够触发 (一轮都没跑过也算)', () => {
+    const d = shouldRebuildCriterion({ criterionDirection: 'green-before', rounds: [], alreadyRebuilt: false });
+    // 证伪: `shouldRebuildCriterion` 不读 `criterionDirection` → rebuild===false, 本条红。
+    expect(d.rebuild).toBe(true);
+    expect(d.reason).toContain('green-before');
+  });
+
+  test('★ 判别力: red-before / inconclusive / 缺席 ⇒ 落回既有规则 (不因方向性触发)', () => {
+    for (const dir of ['red-before', 'inconclusive', undefined] as const) {
+      const d = shouldRebuildCriterion({
+        ...(dir ? { criterionDirection: dir } : {}),
+        rounds: [{ exitCode: 4, touched: 3 }],
+        alreadyRebuilt: false,
+      });
+      expect(d.rebuild).toBe(false);
+    }
+  });
+
+  test('★ 优先级: alreadyRebuilt 仍压过一切; target=criterion 的 reason 仍是既有原文 (排在 direction 之前)', () => {
+    expect(shouldRebuildCriterion({ criterionDirection: 'green-before', rounds: [], alreadyRebuilt: true }).rebuild).toBe(false);
+    const d = shouldRebuildCriterion({ verdictTarget: 'criterion', criterionDirection: 'green-before', rounds: [], alreadyRebuilt: false });
+    // 证伪: 把 direction 那一支排到 verdictTarget 之前 → reason 变成 green-before 那条, 本条红。
+    expect(d.reason).toContain('target=criterion');
+  });
+});
+
 // ── 纯核 ②: 自证门准入 ──────────────────────────────────────────────────────
 
 describe('INV-4 纯核: criterionRebuildAdmission —— 全过才准冻结 (fail-closed)', () => {

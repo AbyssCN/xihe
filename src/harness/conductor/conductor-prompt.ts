@@ -118,12 +118,13 @@ export function renderConductorPrefix(tools: readonly ConductorTool[]): string {
 export function renderConductorFacts(f: ConductorFacts): string {
   const lines: (string | undefined)[] = [
     `- Goal: ${f.goal}`,
-    // 1-A: 判据文件先落盘 —— 并进判据那一行 (INV-8 满槽只剩几十字符余量, 单开一行会顶出 8000)。这是散文, 闸在
-    // orchestrating-loop (第一个派发强制写集 + 之后路径禁令), 散文只是让 conductor 别撞闸。
+    // 1-A: 判据引用的文件 —— 并进判据那一行 (INV-8 满槽只剩几十字符余量, 单开一行会顶出 8000)。这是散文, 闸在
+    // orchestrating-loop (判据文件写出即冻结 + 之后路径禁令), 散文只是让 conductor 别撞闸。
+    // 2026-09-05 (只留边界): 措辞不再规定第一发做什么 —— 先勘察还是先写判据由 conductor 定, 引擎只说边界。
     f.acceptance
       ? `- Acceptance command: \`${f.acceptance.command}\`, expected exit ${f.acceptance.expect_exit}. Workers run it with run_acceptance().` +
         (f.criterionFiles && f.criterionFiles.length
-          ? ` Missing now: ${f.criterionFiles.join(', ')} — dispatch #1 must be ONE work() that writes exactly these (write_set forced), then they are frozen.`
+          ? ` Missing now: ${f.criterionFiles.join(', ')} — frozen (hashed) once written; later edits to them are blocked. Explore or write them first, your call.`
           : '')
       : '- Acceptance command: none. The verifier decides.',
     `- Work root: ${f.writeRoot.replace(/\\/g, '/')}. Protected paths: ${f.protectedPaths && f.protectedPaths.length ? f.protectedPaths.join(', ') : 'none declared'}.`,

@@ -105,10 +105,10 @@ export function computeLoopDispatchFacts(
 }
 
 /**
- * 1-A (2026-09-03) 判据先落盘冻结的台账。判据命令引用、run 开始时不存在的文件: conductor 的第一个派发只准产出它们,
- * 引擎在实装派发之前记下 hash, 之后的派发走路径禁令 (agent-tools withProtectedPaths)。
- * 三态: 整格缺席 = 判据不引用未存在文件 (不适用); `frozenAtDispatch` 缺席 = 还没派成过; `hashes[f] === null` = 派发回来
- * 文件仍不存在 (没冻住, 不受保护); `tampered` 缺席 = 没核过, `[]` = 核过全同。
+ * 1-A (2026-09-03; 2026-09-05 只留边界) 判据冻结的台账。判据命令引用、run 开始时不存在的文件: 它们一旦被写出就冻结
+ * (引擎记下 hash), 之后任何派发改它们都会被工具闸拒 (agent-tools withProtectedPaths); 先勘察还是先写判据由 conductor 定。
+ * 三态: 整格缺席 = 判据不引用未存在文件 (不适用); `frozenAtDispatch` 缺席 = 还没有哪一发把它们写出来;
+ * `hashes[f] === null` = 冻结那一刻该文件仍不存在 (不受保护); `tampered` 缺席 = 没核过, `[]` = 核过全同。
  */
 export interface CriterionFreeze {
   files: string[];

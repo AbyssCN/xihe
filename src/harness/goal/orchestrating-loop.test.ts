@@ -669,11 +669,15 @@ describe('1-A (2026-09-03): 判据先落盘冻结', () => {
     expect(seen2[0]!.cfg.leafFace!({ id: CONDUCTOR_NODE_ID })!.systemPrompt!).not.toContain('Missing now:');
   });
 
-  test('★ 工具面: 冻住前非 work 拒 (计 rejectedCompile); 第一张 work 写集被强制为判据文件; 回来记 hash; 之后派发在路径禁令里跑; 改动后 tampered 可见', async () => {
+  // 2026-09-05 (只留边界, 契约 D-6): 本条原来断言的是 ①「冻住前非 work 拒」与 ②「第一张 work 写集被强制」——
+  // 那两条是「规定怎么做」, 已去掉。这里翻转成断言**新行为**: 冻住前谁都不拒、写集原样, 边界那一半照旧。
+  test('★ 工具面: 冻住前不拒 explore / 不改写集; 判据文件写出后记 hash 冻结; 之后派发在路径禁令里跑; 改动后 tampered 可见', async () => {
     const root = mkdtempSync(join(tmpdir(), 'omd-1a-face-'));
     const ledger = createConductorCardLedger();
     const guarded: (readonly string[])[] = [];
     const plans: ConductorPlan[] = [];
+    // 判据文件由**第二发**的 worker 写出来 —— 第一发是勘察, 它有权先不写。
+    let writeCriterion = false;
     const ctx = { ...CTX, cwd: root, writeRoot: root, acceptance: { command: 'bun test tests/a.test.ts', expect_exit: 0 } };
     const face = buildConductorFace(
       { ...FACTS, writeRoot: root, criterionFiles: ['tests/a.test.ts'] },
@@ -684,8 +688,7 @@ describe('1-A (2026-09-03): 判据先落盘冻结', () => {
         withProtected: ((paths, fn) => { guarded.push(paths ?? []); return fn(); }) as typeof withProtectedPaths,
         runChild: async (p) => {
           plans.push(p);
-          // 模拟 worker: 第一张 work 真把判据文件写出来。
-          if (!existsSync(join(root, 'tests/a.test.ts'))) {
+          if (writeCriterion && !existsSync(join(root, 'tests/a.test.ts'))) {
             mkdirSync(join(root, 'tests'), { recursive: true });
             writeFileSync(join(root, 'tests/a.test.ts'), 'expect(1).toBe(1)');
           }
@@ -695,21 +698,23 @@ describe('1-A (2026-09-03): 判据先落盘冻结', () => {
     );
     const work = face.customTools!.find((t) => t.name === 'work')!;
     const explore = face.customTools!.find((t) => t.name === 'explore')!;
-    // 冻住前派 explore → 拒, 文案指明先派 work 写判据文件。
-    const rej = await explore.execute('t', { questions: ['where?'] });
-    expect((rej as { content: { text: string }[] }).content[0]!.text).toContain('[1-A 判据先落盘]');
-    expect(ledger.rejectedCompile).toBe(1);
-    expect(plans).toHaveLength(0);
-    // 第一张 work 带了别的写集 → 被强制成判据文件。
+    // 冻住前派 explore → 照跑 (先勘察还是先写判据由 conductor 定)。
+    const d1 = await explore.execute('t', { questions: ['where?'] });
+    // 证伪: 把 D-1 的拒绝块加回去 → 回执是 '[1-A 判据先落盘]' 拒因且 plans 为空, 下面三条红。
+    expect((d1 as { content: { text: string }[] }).content[0]!.text).toContain('仍未写出');
+    expect(ledger.rejectedCompile).toBe(0);
+    expect(plans).toHaveLength(1);
+    // 第二发 work 带了别的写集 → 原样透传, 不被改成判据文件。
+    writeCriterion = true;
     const ok1 = await work.execute('t', { goal: 'write the acceptance test', brief: 'repro: none yet; create tests/a.test.ts covering add(); do not touch src.', write_set: ['src/add.ts'] });
-    expect(Object.values(plans[0]!.nodes)[0]!.write_set).toEqual(['tests/a.test.ts']); // 证伪: 去掉强制 → ['src/add.ts'], 红
-    expect(guarded).toHaveLength(0); // 第一张不在禁令里跑 (它就是来写这些文件的)
-    expect(ledger.criterionFreeze!.frozenAtDispatch).toBe(1);
+    expect(Object.values(plans[1]!.nodes)[0]!.write_set).toEqual(['src/add.ts']); // 证伪: 把 ② 的强制加回去 → ['tests/a.test.ts'], 红
+    expect(guarded).toHaveLength(0); // 冻住的那一发自己不在禁令里跑 (它就是来写这些文件的)
+    expect(ledger.criterionFreeze!.frozenAtDispatch).toBe(2); // 证伪: 冻结块只在第 1 发查 → 缺席, 红
     expect(ledger.criterionFreeze!.hashes!['tests/a.test.ts']).toMatch(/^[0-9a-f]{16}$/);
     expect((ok1 as { content: { text: string }[] }).content[0]!.text).toContain('[1-A 判据文件已冻结');
-    // 第二张 work: 写集不再被改, 但子 run 在路径禁令里跑。
+    // 第三发 work: 写集仍原样, 但子 run 在路径禁令里跑。
     await work.execute('t', { goal: 'implement add', brief: 'repro: bun test tests/a.test.ts → 1 fail exit 1. scope src/add.ts only.', write_set: ['src/add.ts'] });
-    expect(Object.values(plans[1]!.nodes)[0]!.write_set).toEqual(['src/add.ts']);
+    expect(Object.values(plans[2]!.nodes)[0]!.write_set).toEqual(['src/add.ts']);
     expect(guarded).toEqual([['tests/a.test.ts']]); // 证伪: 不包 withProtected → [], 红
     // 判卷真值: 未变 → "未变"; 有人绕过闸改了 → tampered + "已变"。
     expect(renderCriterionFreezeTruth(ledger.criterionFreeze!, root)).toContain('判卷时未变');
@@ -719,7 +724,7 @@ describe('1-A (2026-09-03): 判据先落盘冻结', () => {
     expect(renderCriterionFreezeTruth(ledger.criterionFreeze!, root)).toContain('判卷时已变');
   });
 
-  test('第一张 work 回来文件仍不存在 → 没冻住 (hashes 缺席), 下一次派发继续强制; 回灌第二跑从 ledger 恢复保护', async () => {
+  test('派发回来文件仍不存在 → 没冻住 (hashes 缺席), 下一次派发写集仍原样; 回灌第二跑从 ledger 恢复保护', async () => {
     const root = mkdtempSync(join(tmpdir(), 'omd-1a-miss-'));
     const ledger = createConductorCardLedger();
     const plans: ConductorPlan[] = [];
@@ -727,10 +732,11 @@ describe('1-A (2026-09-03): 判据先落盘冻结', () => {
     const face = buildConductorFace({ ...FACTS, writeRoot: root, criterionFiles: ['tests/a.test.ts'] }, { ctx, ledger, criterionFreeze: { files: ['tests/a.test.ts'], root }, runChild: async (p) => { plans.push(p); return fakeExec(p); } });
     const work = face.customTools!.find((t) => t.name === 'work')!;
     const r1 = await work.execute('t', { goal: 'g', brief: 'b'.repeat(40) });
-    expect((r1 as { content: { text: string }[] }).content[0]!.text).toContain('一个都没写出来');
+    expect((r1 as { content: { text: string }[] }).content[0]!.text).toContain('仍未写出');
     expect(ledger.criterionFreeze).toEqual({ files: ['tests/a.test.ts'] }); // 没冻住 = frozenAtDispatch / hashes 缺席, 不编
     await work.execute('t', { goal: 'g2', brief: 'c'.repeat(40), write_set: ['src/x.ts'] });
-    expect(Object.values(plans[1]!.nodes)[0]!.write_set).toEqual(['tests/a.test.ts']); // 第二次仍强制
+    // 证伪 (D-6 翻转): 把 ② 的写集强制加回去 → ['tests/a.test.ts'], 本条红。
+    expect(Object.values(plans[1]!.nodes)[0]!.write_set).toEqual(['src/x.ts']);
     // 回灌第二跑: 新工具面, deps 不带 criterionFreeze, 只靠 ledger 里已有 hashes 恢复。
     mkdirSync(join(root, 'tests'), { recursive: true });
     writeFileSync(join(root, 'tests/a.test.ts'), 'x');

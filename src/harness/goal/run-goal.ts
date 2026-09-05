@@ -1046,10 +1046,15 @@ export const CRITERION_REBUILD_LABEL = 'criterion-rebuild';
 /**
  * INV-4: 什么时候该去**改判据**而不是再烧一轮修复。
  *
- * 两条触发路 (或):
+ * 三条触发路 (或):
  *  ① 否决分型指向判据 (verifier 说的是「判据错了/可被游戏」, 见 verifier.ts 的 VER-4);
  *  ② 判据读数**纹丝不动**而 leaf 在产出 —— 连续 2 轮 exitCode 逐字相同, 且这两轮 leaf
  *    都写了东西。少了后半条就会把「执行侧压根没动」误读成「判据瞎了」(#4 那格的反面)。
+ *  ③ #205 方向性探针读到 `green-before` (2026-09-05): 判据文件刚写出来、实装还没做的那一刻,
+ *    判据就已经绿了 —— 它量的不是本次目标。同批读数: green-before 7 题 reward 均值 0.212 而
+ *    全批 0.610, 假阳性 1/7。**只触发重建, 不判失败、不拦派发** (探针本身仍是 fail-open)。
+ *    ⚠ 去掉 1-A ① (首发必须是单独写判据的 work) 之后, green-before 多了一种成因: 同一发里
+ *    实装已经做完。这正是它只配当「去看看判据」而不配当「判失败」的理由。
  *
  * ⚠ exitCode 缺席 (`null` / `undefined`) **不算"逐字相同"**: 没记与记了 0 是两件事,
  *   拿两个 NULL 相等去开重建轮, 等于让"没观测到"变成一条证据 (仓规坑 ①)。
@@ -1058,12 +1063,17 @@ export const CRITERION_REBUILD_LABEL = 'criterion-rebuild';
  */
 export function shouldRebuildCriterion(input: {
   verdictTarget?: VerdictTarget;
+  /** #205 方向性探针的结论 (orchestrating-loop 冻结那一刻跑, 记在 `loopLedger.criterionDirection`)。 */
+  criterionDirection?: 'red-before' | 'green-before' | 'inconclusive';
   rounds: readonly { exitCode: number | null | undefined; touched: number }[];
   alreadyRebuilt: boolean;
 }): { rebuild: boolean; reason: string } {
   if (input.alreadyRebuilt) return { rebuild: false, reason: '本 run 已重建过一次判据 (上限 1, 不再重建)' };
   if (input.verdictTarget === 'criterion') {
     return { rebuild: true, reason: 'verifier 否决分型 target=criterion (判据错了/可被游戏), 烧修复轮治不了' };
+  }
+  if (input.criterionDirection === 'green-before') {
+    return { rebuild: true, reason: '#205 方向性探针 green-before: 判据在本次改动发生前就已经绿, 它量的不是本次目标' };
   }
   const [a, b] = input.rounds.slice(-2);
   if (
@@ -2124,14 +2134,16 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   }
   // ── INV-4 判据重建边 (D-4 / GWT-4) ──────────────────────────────────────────────
   //
-  // 触发 = 否决分型指向判据, 或判据读数纹丝不动而 leaf 在产出。判据在 shouldRebuildCriterion;
-  // 这里只负责喂参数、叫重建者、把重建出来的那条**过全部自证门**、留痕。
+  // 触发 = 否决分型指向判据, 或判据读数纹丝不动而 leaf 在产出, 或 #205 探针读到 green-before。
+  // 判据在 shouldRebuildCriterion; 这里只负责喂参数、叫重建者、把重建出来的那条**过全部自证门**、留痕。
   //
   // ⚠ 诚实边界: 重建出的判据**不进本 run 的终态判定** (见 RunGoalResult.criterionRebuild 的注)。
   let criterionRebuild: RunGoalResult['criterionRebuild'];
   const rebuildTrigger = runnable
     ? shouldRebuildCriterion({
         ...(lastVerdict ? { verdictTarget: lastVerdict.target } : {}),
+        // 路 ③ (2026-09-05): 探针没跑过就缺席, 不编 'red-before' —— 缺席 ≠ 红 (仓规坑 ①)。
+        ...(loopLedger.criterionDirection !== undefined ? { criterionDirection: loopLedger.criterionDirection } : {}),
         rounds: roundObs.map((o) => ({ exitCode: o.exitCode, touched: o.touched })),
         alreadyRebuilt: false,
       })

@@ -95,7 +95,8 @@ describe('1-A (2026-09-03): 判据文件先落盘的事实行', () => {
     const tools = createConductorTools(ctx);
     const base = buildConductorSystemPrompt(FULL_FACTS, tools);
     const withFiles = buildConductorSystemPrompt({ ...FULL_FACTS, criterionFiles: ['tests/test_tz.py'] }, tools);
-    expect(withFiles).toContain('Missing now: tests/test_tz.py — dispatch #1 must be ONE work()');
+    // 2026-09-05 (只留边界): 措辞从「dispatch #1 must be ONE work()」翻成只说边界 —— 引擎不再规定第一发做什么。
+    expect(withFiles).toContain('Missing now: tests/test_tz.py — frozen (hashed) once written');
     console.log(`conductor resident with criterionFiles=${withFiles.length} chars (+${withFiles.length - base.length})`);
     // 满槽夹具 (900 字 goal + protectedPaths + upstream) 本就贴着 8000; 真 bench 事实没有 upstream / protectedPaths, 约 7780 + 这段。
     expect(withFiles.length - base.length).toBeLessThanOrEqual(140);
