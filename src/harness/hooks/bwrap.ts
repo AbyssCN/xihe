@@ -19,6 +19,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync }
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 
+import { resolveRepoEnv } from './repo-env';
 import { findExecToolchain, resolveToolchainBinds, type ExecToolchain } from './toolchain';
 
 /**
@@ -275,6 +276,11 @@ export function bwrapArgs(root: string, roBinds: string[], opts: BwrapOpts = {})
   // ⚠ 必须排在 `--tmpfs /tmp` 之后 —— bwrap 按给定顺序叠挂, 反了就被 tmpfs 整个盖掉。
   const toolchain = resolveToolchainBinds(root);
   for (const h of toolchain.homeBinds) args.push('--ro-bind', h.src, h.dest);
+  // 本仓**显式声明**的凭据 (`.omd/config.json` 的 `env.homePaths`) —— 同样落 HOME 相对位置,
+  // 同样 **ro**。只认声明不自动发现: 理由见 hooks/repo-env 模块头 (jail 存在的一半理由就是
+  // 限制外泄面, 引擎不替 owner 决定把哪些密钥递进沙箱)。
+  const repoEnv = resolveRepoEnv(root);
+  for (const h of repoEnv.homeBinds) args.push('--ro-bind', h.src, h.dest);
   args.push('--chdir', root);
   // pi agent dir 分层挂载 (2026-07-25 三轮实证): HOME=/tmp 后 worker 缺 /tmp/.pi/agent →
   // 注册制 provider (mimo-platform/opencode-go/…) 全消失, leaf 全军覆没 leafTokens=0。

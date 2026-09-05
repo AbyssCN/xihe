@@ -37,9 +37,10 @@
  *   主树上没提交的东西在那边看不见。这是隔离的定义, 但用的人容易惊讶, 所以写在这里。
  */
 import type { Dirent } from 'node:fs';
-import { existsSync, readdirSync, symlinkSync, mkdirSync, readlinkSync} from 'node:fs';
-import { join, isAbsolute} from 'node:path';
+import { existsSync, readdirSync, symlinkSync, mkdirSync, readlinkSync, copyFileSync} from 'node:fs';
+import { join, isAbsolute, dirname} from 'node:path';
 import { logger } from './logger';
+import { resolveRepoEnv } from './hooks/repo-env';
 import { captureRollbackAnchor, type RollbackAnchor } from './writeset/rollback-anchor';
 import { isDeliveredOutcome } from './run-outcome';
 
@@ -363,6 +364,41 @@ export function ensureNodeModulesLinks(
 }
 
 /**
+ * 把本仓**显式声明**的 env 文件(`.omd/config.json` 的 `env.files`)拷进隔离 worktree。
+ *
+ * 为什么必须拷:那些文件按定义是 gitignore 的,而 `git worktree add` 出来的树**只有 git 认识的
+ * 文件** —— 于是需要它们的命令(起 dev server、连数据库、跑驱动式审查)在隔离树里直接起不来,
+ * 症状看起来像"这仓本来就跑不通"。同 `ensureNodeModulesLinks` 的位置与理由。
+ *
+ * ⚠ **拷不是链**:link 会让隔离树里的写穿回主树(env 文件常被工具改写)。
+ * ⚠ 路径边界由 {@link resolveRepoEnv} 判死(相对 + 不许 `..`),这里不再二次开口。
+ */
+export function ensureDeclaredEnvFiles(
+  mainRoot: string,
+  worktreeDir: string,
+  deps: { copy?: (src: string, dest: string) => void; mkdir?: (p: string) => void } = {},
+): Array<{ rel: string; result: 'copied' | string }> {
+  const copy = deps.copy ?? ((src: string, dest: string) => copyFileSync(src, dest));
+  const mkdir = deps.mkdir ?? ((p: string) => mkdirSync(p, { recursive: true }));
+  const spec = resolveRepoEnv(mainRoot);
+  const out: Array<{ rel: string; result: 'copied' | string }> = [];
+  for (const rel of spec.files) {
+    const dest = join(worktreeDir, rel);
+    try {
+      mkdir(dirname(dest));
+      copy(join(mainRoot, rel), dest);
+      out.push({ rel, result: 'copied' });
+    } catch (e) {
+      // fail-open 吞异常不吞证据: 一个文件拷不动不该掀掉整次 run, 但失败原文必须出得来。
+      out.push({ rel, result: `copy-failed: ${(e as Error).message.slice(0, 200)}` });
+    }
+  }
+  // 声明了却没生效的(路径被拒 / 盘上没有)必须可见 —— 静默少一个 env 文件正是本函数要治的病。
+  for (const m of spec.missing) out.push({ rel: '(declared)', result: `skipped: ${m}` });
+  return out;
+}
+
+/**
  * 按策略给这次 run 准备工作目录。
  *
  * @param strategy 缺省 `head` —— **不传就是今天的行为**, 零回归。
@@ -415,6 +451,9 @@ export function prepareRunWorktree(
     for (const { rel, result } of (deps.ensureLink ?? ensureNodeModulesLinks)(cwd, dir)) {
       if (result !== 'already-present') logger.info({ runId, dir, rel, result }, '[omd/run-worktree] #166/#174 node_modules 链入 (resume 复用路)');
     }
+    for (const { rel, result } of ensureDeclaredEnvFiles(cwd, dir)) {
+      logger.info({ runId, dir, rel, result }, '[omd/run-worktree] 声明的 env 文件拷入 (resume 复用路)');
+    }
     // #168 候选①: 只在复用路检测 (新建路刚从 HEAD 建出, 不可能落后)。只警告, 不代合。
     const behindWarning = detectBehind(cwd, dir, branch, deps.gitOut ?? defaultGitOut);
     if (behindWarning) logger.warn({ runId, dir, branch }, `[omd/run-worktree] ${behindWarning}`);
@@ -450,6 +489,11 @@ export function prepareRunWorktree(
   for (const { rel, result } of (deps.ensureLink ?? ensureNodeModulesLinks)(cwd, dir)) {
     if (result.startsWith('link-failed')) logger.warn({ runId, dir, rel, result }, '[omd/run-worktree] #166/#174 node_modules 链入失败 (fail-open, 树内测试可能环境性红)');
     else logger.info({ runId, dir, rel, result }, '[omd/run-worktree] #166/#174 node_modules 链入');
+  }
+  // 本仓声明的 env 文件 (gitignore ⇒ 新树里不会有, 见 ensureDeclaredEnvFiles 的注)。
+  for (const { rel, result } of ensureDeclaredEnvFiles(cwd, dir)) {
+    if (result === 'copied') logger.info({ runId, dir, rel }, '[omd/run-worktree] 声明的 env 文件拷入');
+    else logger.warn({ runId, dir, rel, result }, '[omd/run-worktree] 声明的 env 文件未生效 (fail-open, 需要它的命令在树内会起不来)');
   }
   const anchor = (deps.checkTree ?? ((c: string) => captureRollbackAnchor({ cwd: c })))(cwd);
   const dirty = (anchor.dirtyTracked ?? 0) + (anchor.untracked ?? 0);
