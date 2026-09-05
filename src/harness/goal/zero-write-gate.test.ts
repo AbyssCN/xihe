@@ -58,6 +58,54 @@ describe('zeroWriteVerdict — INV-1 纯逻辑四格', () => {
   });
 });
 
+// ── `.omd/` 不算产物 ────────────────────────────────────────────────────────────
+//
+// 盘上判例 (2026-09-05 复算): `results/omd-bridge-code80-nofreeze/2026-09-05__14-14-11/
+// product_analytics-hard-ab_test_a__e2zgULK/agent/omd-output.txt` 末尾的「post-solve git state」
+// **只有一行 `?? .omd/`**, 同题 `verifier/agent.patch` 0 字节, 终态 `outcome: success`。
+// 引擎自己往 `.omd/` 写留痕是每跑必然发生的事 —— 拿它当"盘上有改动", 这道闸在生产里恒
+// `zero:false`, 契约 §0 那 11 个假 success 一个都拦不到。
+//
+// ## 证伪 (真跑过一次)
+// · 去掉 `zeroWriteVerdict` 里剔除 `.omd/` 的那一段 ⇒ ★下面第一条与 `./` 前缀那条当场红。
+describe('zeroWriteVerdict — `.omd/` 是引擎留痕, 不是交付产物', () => {
+  test('★ 只有 `.omd/` (bench 容器里 git status 的实测原文) ⇒ 仍判零写入并拦下', () => {
+    const v = zeroWriteVerdict({ converged: true, isResume: false, changed: { files: ['.omd/'] } });
+    expect(v.block).toBe(true);
+    expect(v.checked).toBe(true);
+    expect(v.zero).toBe(true);
+    // 与"git status 本来就空"分两句念: 两者是不同的现场, 压成一句事后分不开 (仓规坑 ①)。
+    expect(v.why).toContain('.omd/');
+  });
+
+  test('★ `.omd/` 与真产物并存 ⇒ zero=false 不拦 (剔的是留痕, 不是把整格判死)', () => {
+    const v = zeroWriteVerdict({
+      converged: true,
+      isResume: false,
+      changed: { files: ['.omd/dag-runs.db', 'src/a.ts'] },
+    });
+    expect(v.block).toBe(false);
+    expect(v.checked).toBe(true);
+    expect(v.zero).toBe(false);
+  });
+
+  test('`./.omd/x` 与 `.omd/x` 同判 (porcelain 的路径前缀形状不该决定闸判不判)', () => {
+    const v = zeroWriteVerdict({
+      converged: true,
+      isResume: false,
+      changed: { files: ['./.omd/continuity/x.json', '.omd/run-board.jsonl'] },
+    });
+    expect(v.block).toBe(true);
+    expect(v.zero).toBe(true);
+  });
+
+  test('对照臂: 名字里带 .omd 但不在 `.omd/` 下的真文件不许被剔 (如 `src/.omdrc`)', () => {
+    const v = zeroWriteVerdict({ converged: true, isResume: false, changed: { files: ['src/.omdrc'] } });
+    expect(v.block).toBe(false);
+    expect(v.zero).toBe(false);
+  });
+});
+
 // ── INV-2 接线 e2e ───────────────────────────────────────────────────────────────
 //
 // 造一份「冻结判据绿 + conductor 跑完」的执行段结果 —— 改前这份输入的终态逐字是 success。

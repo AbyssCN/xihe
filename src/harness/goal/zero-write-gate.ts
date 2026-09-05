@@ -47,11 +47,39 @@ export function zeroWriteVerdict(input: ZeroWriteInput): ZeroWriteVerdict {
   if ('error' in input.changed) {
     return { checked: false, block: false, why: `盘上改动取不到, 不拦: ${input.changed.error}` };
   }
-  if (input.changed.files.length > 0) return { checked: true, zero: false, block: false };
+  const delivered = input.changed.files.filter((f) => !isEngineTrace(f));
+  if (delivered.length > 0) return { checked: true, zero: false, block: false };
+  // 两种零写入**分两句念** (仓规坑 ①): 「git status 本来就空」与「只剩引擎自己的留痕」是
+  // 不同的现场, 压成同一句话事后再也分不开是哪一种。
   return {
     checked: true,
     zero: true,
     block: true,
-    why: '收敛判定成立但盘上没有任何改动 (git status 空)',
+    why:
+      input.changed.files.length > 0
+        ? '收敛判定成立但盘上只有引擎自己的 `.omd/` 留痕, 没有任何交付产物'
+        : '收敛判定成立但盘上没有任何改动 (git status 空)',
   };
+}
+
+/**
+ * `.omd/` 下的一律不算产物 —— 与 `run-goal.ts` 的 `collectTouchedPaths`
+ * (「越出 cwd 的、以及 `.omd/` 下的 (引擎自己的留痕库) 一律不收」) 同一条纪律。
+ *
+ * **为什么闸这一侧必须自己剔**: 上游 `collectChangedFiles` 只滤 `!!` (被忽略的), 而 bench
+ * 容器里 `.omd/` **不在 .gitignore 里**, 于是 `git status --porcelain` 恒有一行 `?? .omd/`
+ * (实测原文: `code80-nofreeze/2026-09-05__14-14-11/product_analytics-hard-ab_test_a__e2zgULK/`
+ * 那题 `agent/omd-output.txt` 末尾的「post-solve git state」只有这一行, 而同题
+ * `verifier/agent.patch` 0 字节、终态 `outcome: success`)。
+ * 不剔 = 这道闸在生产里恒 `zero:false` = 一条永远绿的闸。
+ *
+ * ⚠ 剔在**闸这一侧**, 不去动 `collectChangedFiles` 本身: 那个函数还给 rubric 判官的产物
+ * 证据面用, 那边要不要看 `.omd/` 是另一件事, 顺手改会把两处判据绑死。
+ *
+ * 判据 = **首段**是 `.omd` (`.omd/` · `.omd/x` · `./.omd/x` 都算), 不是"路径里含 .omd" ——
+ * 后者会连 `src/.omdrc` 这种真文件一起剔掉。
+ */
+function isEngineTrace(file: string): boolean {
+  const rel = file.startsWith('./') ? file.slice(2) : file;
+  return rel.split(/[\\/]/)[0] === '.omd';
 }
