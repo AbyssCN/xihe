@@ -206,3 +206,86 @@ describe('agent leaf grind 三档阶梯 (注入时钟 + 假 advisor, GWT-3 abort
     expect(r.watchdog?.stalled).toBe(false);
   });
 });
+// ── face 自报进展 (2026-09-05, R0/R1 实账) ────────────────────────────
+/**
+ * 治的病: grind 停滞钟只认「写入新文件路径」, 而 conductor 的手是 `['read','ls','grep','bash']`
+ * + 派工卡且 `readOnlyShell: true` —— **结构上不可能写文件**。于是 `stall ≡ wall`, 三档退化成
+ * 600s 必 advisor / 900s 必 wrapup / **1500s 必 abort**, 派得再好照砍。
+ * 实账: R0 的 `stallAtAbort=1536108ms` ≈ 节点全寿命 = 那口钟一次没走过。
+ *
+ * 正解是**换尺子不换闸**: 每种面报自己的进展 (LeafFace.progress), 一套熔断照常有牙。
+ */
+describe('LeafFace.progress —— 不写文件的面(conductor)也量得出活着', () => {
+  const startedAtMs = 1_700_000_000_000;
+  /** 与 GWT-3 同一条时钟脚本: 不干预的话三档必然走完到 abort。 */
+  const clock = () => {
+    const tAdvisor = startedAtMs + GRIND_WALL_MS + GRIND_STALL_MS + 1000;
+    const tWrapup = tAdvisor + GRIND_WRAPUP_MS + 1000;
+    const tAbort = tWrapup + GRIND_ABORT_MS + 1000;
+    // ⚠ 第 1 次 = `const startedAt = now()`; 第 2 次 = **首条消息之前**的那记 onActivity ping
+    // (此时 conductor 还没派出任何东西, 进展理应是 0) —— 拨到 startedAt, 否则脚本在第一发就把
+    // 预算烧光, 量的就不是 progress 了。之后三次逐档拨到阈值。
+    const seq = [startedAtMs, startedAtMs, tAdvisor, tWrapup, tAbort, tAbort, tAbort, tAbort, tAbort, tAbort];
+    let n = 0;
+    return { startedAtMs, tAdvisor, tWrapup, tAbort, now: (): number => seq[n++] ?? tAbort };
+  };
+  const readOnlyFace = (progress?: () => number) => ({
+    toolNames: ['read'],
+    systemPrompt: '你是 conductor, 不写文件, 只派工。',
+    readOnlyShell: true,
+    ...(progress ? { progress } : {}),
+  });
+
+  // 证伪方式: 把 maybeFireGrindEscalation 里 face.progress 那一段删掉 → 本条由绿转红 (退回 abort)。
+  it('★ 进展在涨 → 停滞钟随之推进, 墙钟远超 abort 阈值也一档不触发 (conductor 派得好不该被砍)', async () => {
+    let dispatched = 0;
+    let askAdvisorCalls = 0;
+    // ⚠ 时钟**由派工驱动**, 不用固定脚本: 每派成一发就走 GRIND_WALL_MS。这样墙钟一路涨到
+    // 4×600s = 40min (远过三档的 25min 铡刀), 而每次 poll 的 stall 恒 0 —— 正是要判的那件事:
+    // **活着与否由进展说了算, 不由墙钟说了算**。固定脚本会让时钟跑在假消息流前面, 量的就不是 progress 了。
+    const now = (): number => startedAtMs + dispatched * GRIND_WALL_MS;
+    const run = createAgentLeafRunner({
+      cwd,
+      // 每一轮都真派出去一发并拿回结果 —— 这就是 conductor 的"有进展", 它一个文件都没写。
+      sdkQueryFn: () =>
+        (async function* () {
+          for (const m of [asst('派一发'), asst('再派一发'), asst('第三发'), success()]) {
+            dispatched++;
+            yield m;
+          }
+        })(),
+      deps: {
+        now,
+        askAdvisor: async () => {
+          askAdvisorCalls++;
+          return '不该被问到';
+        },
+      },
+    });
+
+    const r: AgentLeafResult = await run({ prompt: '编排子图', model: MODEL, face: readOnlyFace(() => dispatched) });
+
+    // 前提自检: 墙钟真的越过了 abort 阈值 —— 否则本条会因"根本没跑到闸前"而假绿。
+    expect(now() - startedAtMs).toBeGreaterThan(GRIND_WALL_MS + GRIND_WRAPUP_MS + GRIND_ABORT_MS);
+    expect(askAdvisorCalls).toBe(0);
+    expect(r.watchdog?.advisorFiredAt).toBeFalsy();
+    expect(r.watchdog?.abortedByGrind).toBeFalsy();
+    expect(r.spinFused).toBeUndefined();
+  });
+
+  // 这一条钉的是**病本身**: 同一副不写文件的面, 不报进展就必然被砍。它是上一条的对照基线 ——
+  // 两条一起才说明"没被砍"是 progress 的功劳, 不是脚本恰好没走到阈值。
+  it('对照: 同一副面不报进展 → 停滞钟恒不走, 仍旧 abort (这就是 R0 撞的那堵墙)', async () => {
+    const c = clock();
+    const run = createAgentLeafRunner({
+      cwd,
+      sdkQueryFn: fakeQuery([asst('派一发'), asst('再派一发'), asst('第三发'), success()]),
+      deps: { now: c.now, askAdvisor: async () => '建议' },
+    });
+
+    const r: AgentLeafResult = await run({ prompt: '编排子图', model: MODEL, face: readOnlyFace() });
+
+    expect(r.watchdog?.abortedByGrind).toBe(true);
+    expect(r.spinFused).toContain('grind 三档阶梯命中 abort');
+  });
+});

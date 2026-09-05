@@ -2369,6 +2369,8 @@ export function createAgentLeafRunner(opts: AgentLeafRunnerOpts = {}): AgentLeaf
     // pendingGrindAdvice 是一次性注入缓冲 (takeGrindAdvice 消费, pi transformContext 出口 ——
     // SDK 通道无该钩子, 建议只落 watchdog 记录, 同 parseFeedback 那条通道边界)。
     let lastTouchGrowthAtMs = startedAt;
+    /** face 上一次自报的进展读数 (见 LeafFace.progress);单调不减, 增长即推进停滞钟。 */
+    let lastFaceProgress = face?.progress ? face.progress() : 0;
     let pendingGrindAdvice: string | undefined;
     // #178 produce-by 状态: null = 没触发 (量过且没发生, 恒写口径同 advisorFiredAt); 至多 1 次。
     let produceByFiredAt: number | null = null;
@@ -2602,6 +2604,16 @@ export function createAgentLeafRunner(opts: AgentLeafRunnerOpts = {}): AgentLeaf
     // spin-fused, 失败正文带 advisor/wrapup/abort 三档各自的时刻 + stall)。
     const maybeFireGrindEscalation = (): void => {
       const nowMs = now();
+      // 按调用 face 自报的进展 (LeafFace.progress) —— 缺席 = 叶子口径, 停滞钟只认写入新文件路径。
+      // conductor 手里没有写文件的工具 (readOnlyShell + 派工卡), 那口钟对它恒不走 → 三档退化成
+      // 无条件的 25 分钟铡刀。换尺子不换闸: 谁的进展谁报, 熔断照常有牙。判据见 LeafFace.progress。
+      if (face?.progress) {
+        const p = face.progress();
+        if (p > lastFaceProgress) {
+          lastFaceProgress = p;
+          lastTouchGrowthAtMs = nowMs;
+        }
+      }
       // #178 produce-by: 与 grind 阶梯正交, 先判 (它抓"忙着读从没写", grind 抓"卡住不动")。
       // 不清 pendingGrindAdvice 里已有的 wrapup/advisor 指令 —— 高档语义优先, 缓冲空才占用。
       if (

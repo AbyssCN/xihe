@@ -186,6 +186,34 @@ describe('createConductorRuntimeTools — 七张卡的运行期形态 (D-3)', ()
   });
 });
 
+describe('buildConductorFace — grind 进度信号 (2026-09-05)', () => {
+  /**
+   * conductor 的手里没有 write/edit 且 readOnlyShell —— 叶子那把"写入新路径"的停滞尺子对它恒不走,
+   * 三档退化成无条件 25 分钟 abort (实账 R0 `stallAtAbort=1536108ms` ≈ 节点全寿命)。
+   * 所以它必须自报进展, 而"进展"的定义只有一个能站住: **真派出去并拿回了结果**。
+   */
+  test('★ 进展 = dispatches 长度: 被拒的派工不算, 派成才算 (否则刷拒就能按住熔断钟)', async () => {
+    const ledger = createConductorCardLedger();
+    const face = buildConductorFace(FACTS, { ctx: CTX, runChild: async (p) => fakeExec(p), ledger });
+    expect(face.progress).toBeDefined();
+    expect(face.progress!()).toBe(0);
+
+    const work = face.customTools!.find((t) => t.name === 'work')!;
+    await work.execute('t', { goal: 'g' }); // zod 拒
+    await work.execute('t', { help: true }); // 要 manual
+    // 证伪: 若 progress 读的是 ledger.calls, 这里已经是 2 → 本条红。被拒 ≠ 有进展。
+    expect(face.progress!()).toBe(0);
+
+    await work.execute('t', { goal: 'fix add()', brief: 'repro: pytest -q tests/x.py → 1 failed, exit 1. scope src/a.ts; do not touch b.' });
+    expect(face.progress!()).toBe(1);
+  });
+
+  test('没有 ledger → 不报进展 (缺席 ≠ 0: 让 runner 退回叶子口径, 而不是谎称"一直没进展")', () => {
+    const face = buildConductorFace(FACTS, { ctx: CTX, runChild: async (p) => fakeExec(p) });
+    expect(face.progress).toBeUndefined();
+  });
+});
+
 describe('buildConductorFace — INV-8 / D-20', () => {
   test('只读四手 + 七张卡; 常驻 prompt ≤ 8000 且不含任何 manual 首行', () => {
     const face = buildConductorFace(FACTS, { ctx: CTX, runChild: async (p) => fakeExec(p) });

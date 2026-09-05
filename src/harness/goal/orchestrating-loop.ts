@@ -512,10 +512,20 @@ export function buildConductorFace(facts: ConductorFacts, deps: ConductorRuntime
     logger.warn({ chars: systemPrompt.length, max: CONDUCTOR_PROMPT_RESIDENT_MAX }, '[orchestrating-loop] conductor 常驻 prompt 超 INV-8 上限 (照跑, 留证)');
   }
   if (deps.ledger) deps.ledger.residentPromptChars = systemPrompt.length;
+  // grind 停滞钟的进度信号 (2026-09-05)。conductor 结构上不写文件 → 叶子那把"写入新路径"的尺子
+  // 对它恒不走, 三档退化成无条件 25 分钟 abort (实账 R0 `stallAtAbort=1536108ms` ≈ 节点全寿命)。
+  // 它的进展 = **真派出去并拿回了结果**: `dispatches` 在派成 (:492) 与子图报错 (:440) 两处都 push,
+  // 而 help / schema 拒 / 编译拒 / 坐标拒**都不 push** —— 正是要的语义 (被拒的派工不算进展,
+  // 否则 conductor 能靠刷拒把熔断钟按住)。判据见 LeafFace.progress。
+  if (!deps.ledger) {
+    logger.warn({}, '[orchestrating-loop] conductor face 没有 ledger → grind 停滞钟退回叶子口径 (它对 conductor 恒不走, 会在 ~25min 无条件 abort)');
+  }
+  const ledger = deps.ledger;
   return {
     toolNames: [...CONDUCTOR_HAND_TOOLS],
     customTools: createConductorRuntimeTools(deps),
     systemPrompt,
+    ...(ledger ? { progress: () => ledger.dispatches.length } : {}),
     // D-20 机械面 (2026-09-03, smoke8-p3 repo_understanding 那题 conductor 用 heredoc 写了 22KB 产物): bash 只读, 改文件只能派 work()。
     readOnlyShell: true,
     ...(deps.ledger ? { onReadOnlyBlocked: () => { deps.ledger!.readOnlyShellBlocked++; } } : {}),

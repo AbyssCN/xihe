@@ -152,6 +152,29 @@ export interface LeafFace {
   readOnlyShell?: boolean;
   /** R-1: 只读闸每拒一次调一次 (计数进 loop 账本)。缺席 = 不计。 */
   onReadOnlyBlocked?: () => void;
+  /**
+   * **这副面的"有进展"读数** —— grind 停滞钟的进度信号,单调不减。缺席 = 叶子口径
+   * (写入一个新文件路径才算进展, 见 agent-leaf 的 `lastTouchGrowthAtMs`)。
+   *
+   * ## 为什么必须可换 (2026-09-05, R0/R1 实账)
+   *
+   * grind 三档读的是 `lastTouchGrowthAtMs`, 而它**只在写入新文件路径时推进**。conductor 的
+   * 手是 `['read','ls','grep','bash']` + 派工卡, `readOnlyShell: true` —— 它**结构上不可能写文件**,
+   * 它派 `work()`。于是那口钟永远停在 `startedAt`, `stall ≡ wall`, 三档谓词退化成:
+   * 600s 必 advisor · 900s 必 wrapup · **1500s 必 abort**, 派得再好照砍。
+   * 实账对得上: R0 的 `stallAtAbort=1536108ms` ≈ 节点全寿命 = 钟一次没走过。
+   *
+   * 所以这不是"conductor 拿了 worker 的预算", 是**拿了一把量不了它的尺子**。调大常数只是把
+   * 必然的 abort 推后; 豁免又会让真卡住的 conductor 无人管。正解是**换尺子不换闸**:
+   * 每种角色报自己的进展,一套熔断照常有牙。
+   *
+   * ⚠ 与 `#178 produce-by` 同构 —— 那条轴早就用 `expectsArtifact` 把非产物叶摘了出去
+   * (所以 conductor 天然豁免 produce-by); grind 三档从没拿到同样的待遇, 这里补上。
+   *
+   * ⚠ 报什么算进展由**面自己定**, 别在 runner 里按工具名猜: conductor 的 `help` 与被拒的派工
+   * 走同一个工具名, 按名字认会让它靠刷被拒的派工把熔断钟按住。
+   */
+  progress?: () => number;
 }
 
 /**
