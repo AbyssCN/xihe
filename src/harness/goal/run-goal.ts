@@ -102,7 +102,8 @@ import {
 } from './orchestrating-loop';
 import type { AcceptanceProbe } from './acceptance-gate';
 import { countExistingTestsTouched, createConductorCardLedger, withDispatchEvidence, type ConductorCardLedger, type FalsifyLedger, type LoopLedger } from './loop-ledger';
-import { probeEnvFacts } from '../env-facts';
+import { probeEnvFacts, type EnvFacts } from '../env-facts';
+import { ensureTestRunner } from './runner-ready';
 import { renderDiffEvidence } from '../diff-evidence';
 import {
   FALSIFY_PLAN_SCHEMA,
@@ -1152,6 +1153,106 @@ export function criterionRebuildAdmission(
 }
 
 /**
+ * O1 (2026-09-06, 契约 `docs/plan/2026-09-06-墙钟与读次数-执行契约.md`): 判据重建自证门的**第三道 —— 仓内锚定**。
+ *
+ * ## 它补的那个洞 (实账)
+ *
+ * `runs/2026-09-06-e0-e1-e2/readout.md`: 自证门放行了 `test -f .omd/conductor-readonly-sentinel`。
+ * 那条命令过得了前两道 —— `test` 在白名单里、空世界里它也真的红 —— 但它测的是**引擎自己在
+ * `.omd/` 下留的哨兵**, 与这个仓要做的事没有一点关系。判据一旦锚在引擎产物上, 执行体只要
+ * 碰一下那个文件就赢, 而 oracle 全绿。
+ *
+ * ## 三条, 缺一即拒 (fail-closed, 与既有两道同款)
+ *
+ *  ① 不许引 `.omd/` —— 那是引擎的地盘, 不是这个仓的内容;
+ *  ② 首词必须是这个仓真跑得起来的测试 runner (`envFacts.testCommandCandidates` 的首词) 或
+ *     {@link ANCHOR_BINS} 那八个;
+ *  ③ 至少引一个 `git ls-files` 里的路径 (或目录), 或者图里声明会产出的产物路径。
+ *
+ * ⚠ `git ls-files` **算不出来就拒**, 不是放行: 这条判据是执行体家族提的, 拿不到"它真锚在仓里"
+ * 的证明就不准冻结 (与 `criterionRebuildAdmission` 同一条纪律)。
+ *
+ * falsify (本闸必须能真红): 去掉 `.omd/` 那一条 ⇒ criterion-rebuild.test.ts 的
+ * 「`.omd/` 哨兵 ⇒ 拒」当场绿转红; 去掉③ ⇒ 「裸 `pytest -q` ⇒ 拒」当场红。
+ */
+const ANCHOR_BINS: readonly string[] = ['pytest', 'python', 'python3', 'bun', 'npm', 'node', 'go', 'cargo'];
+
+export function repoAnchorBlockReason(
+  command: string,
+  opts: {
+    root: string;
+    envFacts: EnvFacts;
+    declaredArtifacts: readonly string[];
+    /** 注入口 (测试用)。缺省 = `git ls-files`; 返回 `null` = 算不出来 (不是 git 仓 / git 调不通), **与空数组是两件事**。 */
+    lsFiles?: () => readonly string[] | null;
+  },
+): string | null {
+  const c = command.trim();
+  if (!c) return '[blocked repo-anchor: 判据命令为空]';
+  if (/(^|[\s"'=/])\.omd\//.test(c)) {
+    return (
+      `[blocked repo-anchor: 判据引用了 \`.omd/\` 路径 —— 那是引擎自己的产物目录, 不是这个仓的内容。` +
+      `锚在那里的判据, 执行体碰一下那个文件就赢 (实账: \`test -f .omd/conductor-readonly-sentinel\` 曾过了前两道门)。]`
+    );
+  }
+  // ② 首词
+  const firstWordOf = (s: string): string => {
+    const w = s.trim().split(/\s+/)[0] ?? '';
+    return w.includes('/') ? w.slice(w.lastIndexOf('/') + 1) : w;
+  };
+  const allowedFirst = new Set<string>([...ANCHOR_BINS, ...opts.envFacts.testCommandCandidates.map(firstWordOf).filter(Boolean)]);
+  const bin = firstWordOf(c);
+  if (!allowedFirst.has(bin)) {
+    return (
+      `[blocked repo-anchor: 判据首词 '${bin}' 不是这个仓的测试 runner。允许: ${[...allowedFirst].join(' / ')} ` +
+      `—— 判据要跑这个仓的测试, 不是拿别的命令验一个副作用。]`
+    );
+  }
+  // ③ 仓内锚点
+  const tracked = (opts.lsFiles ?? (() => defaultLsFiles(opts.root)))();
+  if (tracked === null) {
+    return '[blocked repo-anchor: 算不出仓内文件清单 (不是 git 仓 / git 调不通) —— 拿不到"它锚在仓里"的证明就不准冻结 (fail-closed)]';
+  }
+  const norm = (p: string): string => p.split('\\').join('/').replace(/^\.\//, '').replace(/\/+$/, '');
+  const anchors = new Set<string>();
+  for (const f of tracked) {
+    const n = norm(f);
+    if (!n) continue;
+    anchors.add(n);
+    // 目录也算锚: `pytest -q tests/` 指的是仓里真实存在的那个目录。
+    const parts = n.split('/');
+    for (let i = 1; i < parts.length; i++) anchors.add(parts.slice(0, i).join('/'));
+  }
+  for (const a of opts.declaredArtifacts) {
+    const n = norm(a);
+    if (n) anchors.add(n);
+  }
+  for (const link of c.split('&&')) {
+    for (const token of link.trim().split(/\s+/).slice(1)) {
+      if (token.startsWith('-')) continue;
+      if (anchors.has(norm(token))) return null;
+    }
+  }
+  return (
+    `[blocked repo-anchor: 判据一个仓内路径都没引 —— \`git ls-files\` 里的路径 (或目录) 与图里声明的产物都没出现在命令里。` +
+    `一条不指向仓内任何东西的判据, 量的不是这个仓。]`
+  );
+}
+
+/** 缺省 IO: `git ls-files`。git 调不通 / 不是 git 仓 → `null` (**算不出来 ≠ 空仓**, §静默坑 1)。 */
+function defaultLsFiles(root: string): readonly string[] | null {
+  try {
+    return execFileSync('git', ['ls-files'], { cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
+      .split('\n')
+      .filter(Boolean);
+  } catch (err) {
+    // fail-open 可以吞异常, 不许吞证据 (§静默坑 2): 返 null 让门 fail-closed 地拒, 原文进日志。
+    logger.warn({ root, err: String(err instanceof Error ? err.message : err) }, '[run-goal] O1 仓内锚定: git ls-files 调不通 → 该门 fail-closed 拒');
+    return null;
+  }
+}
+
+/**
  * board 结算的**跨栈帧信物**(2026-08-26)。`runGoal` 的外壳靠它判断「claim 写了但 terminal 没写」。
  *
  * 为什么不是布尔:结算要写的两个坐标 (板根 / runId) 在 `runGoalInner` 里才算得出来,
@@ -1419,6 +1520,21 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   // (README 里逐字写着的输出键名 / 仓里已经在测这些键的用例) 它从来没读到过。
   // ⚠ 只在**真分类**这条路上跑: 注入 `_classify` 的调用方自己定判据, 闸 C 复用时那一发压根不发 ——
   // 两条路都没有"勘察给谁看"的对象。缺席 (undefined) 与"跑了三段全空"(全 0) 是两件事。
+  // ── W3 (2026-09-06): runner 就绪预检 —— 一次, 分类之前 ────────────────────────
+  //
+  // 治的读数 (契约 §0 末段): `env-install` 步与「No module named pytest」在多题各自出现 ——
+  // 每一题都在自己那一轮里发现 pytest 没装、自己去装一遍。那是**环境事实**, 属于点火前的
+  // 一次性预检, 不该由每个执行体各花几轮去摸。
+  //
+  // ⚠ **默认只记不装**: 装别人的依赖是改环境。`OMD_ENSURE_TEST_RUNNER=1` (bench 的 version yaml
+  // 会开) 才真装; 其余取值 (含缺席/空串) 一律只记事实, 产品路径逐字节同旧。
+  // ⚠ 这一份 `envFacts` 下面 O1 仓内锚定门直接复用 —— 同一趟 run 里那道门与本预检必须看同一份事实,
+  // 各探一遍就会在「pytest 装没装」这件事上给出两个答案。
+  const envFacts = probeEnvFacts(config.cwd);
+  const runnerReady = ensureTestRunner(envFacts, config.cwd, {
+    install: process.env.OMD_ENSURE_TEST_RUNNER?.trim() === '1',
+  });
+  logger.info({ ...runnerReady, root: config.cwd }, '[run-goal] W3 runner 就绪预检 (installed 缺席 = 没试过装, false = 试了没成)');
   let survey: CriterionSurvey | undefined;
   let surveyError: string | undefined;
   const classified = prior
@@ -2324,6 +2440,13 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
           ran: true,
           reason: acceptanceCommandBlockReason(proposal.command, { root: config.cwd, declaredArtifacts }),
         },
+        {
+          // O1 (2026-09-06): 第三道 —— 判据得锚在这个仓里, 不锚在引擎自己的 `.omd/` 产物上。
+          // 前两道各答各的问题 (跑不跑得起来 / 恒不恒真), 都答不了「它量的是不是这个仓」。
+          name: '仓内锚定',
+          ran: true,
+          reason: repoAnchorBlockReason(proposal.command, { root: config.cwd, envFacts, declaredArtifacts }),
+        },
       ];
       if (config.dag.commandRunner) {
         gates.push({
@@ -2815,6 +2938,9 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
         ...(survey ? { criterionSurvey: { ...survey.facts, ...(survey.why ? { why: survey.why } : {}) } } : {}),
         // 三候选共识读数 (2026-09-05 D-5): 同一条理由挂在 loop 上。缺席 = 没开共识 (开关默认关), 不是一致性为 0。
         ...(classified.criterionConsensus ? { criterionConsensus: classified.criterionConsensus } : {}),
+        // W3 runner 就绪预检 (2026-09-06): 同一条理由挂在 loop 上。恒写 —— 预检在这条路上一定跑过,
+        // 「不适用」由 `runner: null` 表达, 不用缺席表达 (§静默坑 1)。
+        runnerReady,
         // #205 第三刀: 执行体改了几个仓库自带的测试文件 (环外信号, 只记账不拦)。
         // `git cat-file -e HEAD:<path>` 判「改动前存在」; 非 git 仓 / git 调不通 → null, 不是 0。
         existingTestsTouched: countExistingTestsTouched(

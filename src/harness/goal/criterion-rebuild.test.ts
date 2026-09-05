@@ -30,6 +30,7 @@
  *  · 接线里去掉留痕串 ⇒ 「摘要含 criterion-rebuild」当场红。
  */
 import { describe, expect, test } from 'bun:test';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,9 +38,11 @@ import {
   runGoal,
   shouldRebuildCriterion,
   criterionRebuildAdmission,
+  repoAnchorBlockReason,
   CRITERION_REBUILD_LABEL,
   type RunGoalConfig,
 } from './run-goal';
+import type { EnvFacts } from '../env-facts';
 import type { GoalClassification } from './classify-acceptance';
 import type { ConductorPlan } from '../conductor-plan';
 import type { ExecutorDagConfig, ExecutorDagResult } from '../dag/types';
@@ -188,7 +191,82 @@ describe('INV-4 纯核: criterionRebuildAdmission —— 全过才准冻结 (fai
   });
 });
 
+// ── 纯核 ③: O1 仓内锚定门 (2026-09-06, INV-7) ──────────────────────────────────
+
+const envFactsFor = (candidates: string[]): EnvFacts => ({
+  root: '/w',
+  languages: [],
+  enabledBins: [],
+  testCommandCandidates: candidates,
+  scanned: { files: 1, dirs: 1, truncated: false, unreadable: [] },
+});
+
+const anchorOpts = (over: Partial<Parameters<typeof repoAnchorBlockReason>[1]> = {}) => ({
+  root: '/w',
+  envFacts: envFactsFor(['pytest -q']),
+  declaredArtifacts: [] as readonly string[],
+  lsFiles: () => ['tests/test_x.py', 'src/app.py', 'README.md'],
+  ...over,
+});
+
+describe('INV-7 纯核: repoAnchorBlockReason —— 判据得锚在仓里, 不锚在引擎自己的产物上', () => {
+  test('★ 引擎自己的 `.omd/` 哨兵 ⇒ 拒 (实账 2026-09-06: 自证门放行了 test -f .omd/conductor-readonly-sentinel)', () => {
+    const r = repoAnchorBlockReason('test -f .omd/conductor-readonly-sentinel', anchorOpts());
+    expect(r).not.toBeNull();
+    expect(r).toContain('.omd/');
+  });
+
+  test('★ 首词在 testCommandCandidates 里 + 路径在 ls-files 里 ⇒ 放行 (这道闸不是恒红)', () => {
+    expect(repoAnchorBlockReason('pytest -q tests/test_x.py', anchorOpts())).toBeNull();
+  });
+
+  test('★ 判别力: 首词不是任何测试 runner ⇒ 拒 (grep 一个文件不是判据)', () => {
+    const r = repoAnchorBlockReason('grep -q OK README.md', anchorOpts());
+    expect(r).not.toBeNull();
+    expect(r).toContain('首词');
+  });
+
+  test('★ 判别力: 首词对但一个仓内路径都没引 ⇒ 拒 (裸 `pytest -q` 锚不到任何东西)', () => {
+    const r = repoAnchorBlockReason('pytest -q', anchorOpts());
+    expect(r).not.toBeNull();
+    expect(r).toContain('仓内');
+  });
+
+  test('★ 图里声明的产物路径也算锚 (它还没被写出来, 但有节点说了会产它)', () => {
+    expect(repoAnchorBlockReason('pytest -q tests/test_new.py', anchorOpts({ declaredArtifacts: ['tests/test_new.py'] }))).toBeNull();
+  });
+
+  test('★ 目录也算锚 (`pytest -q tests/` 指的是仓里真实存在的那个目录)', () => {
+    expect(repoAnchorBlockReason('pytest -q tests/', anchorOpts())).toBeNull();
+  });
+
+  test('★ fail-closed: ls-files 算不出来 (不是 git 仓 / git 调不通) ⇒ 拒, 不是放行', () => {
+    const r = repoAnchorBlockReason('pytest -q tests/test_x.py', anchorOpts({ lsFiles: () => null }));
+    expect(r).not.toBeNull();
+    expect(r).toContain('算不出');
+  });
+
+  test('固定八个 runner 词不依赖 testCommandCandidates (探不出候选的仓也要有路可走)', () => {
+    expect(repoAnchorBlockReason('bun test tests/test_x.py', anchorOpts({ envFacts: envFactsFor([]) }))).toBeNull();
+  });
+});
+
 // ── 接线面 ──────────────────────────────────────────────────────────────────
+
+/**
+ * 真 git 仓 + js marker + 一个被跟踪的测试文件 —— O1 仓内锚定门要读 `git ls-files`,
+ * 而命令闸的语言一致那道要读 marker。两道都是**真读盘**, 替身喂不出这两条判据。
+ */
+function seedRepo(cwd: string): void {
+  writeFileSync(join(cwd, 'out.txt'), 'OK\n');
+  writeFileSync(join(cwd, 'package.json'), '{"name":"fixture"}\n');
+  writeFileSync(join(cwd, 'out.test.ts'), 'export const ok = 1;\n');
+  execFileSync('git', ['init', '-q'], { cwd });
+  execFileSync('git', ['add', '-A'], { cwd });
+}
+
+/** 重建候选的默认形状: 首词是仓里真跑得起来的 runner, 路径在 `git ls-files` 里 —— 三条锚定条件都过。 */
+const REBUILT = 'bun test out.test.ts';
 
 const leaf = (over: Record<string, unknown>): Record<string, unknown> => ({
   id: 'x',
@@ -208,7 +286,7 @@ const leaf = (over: Record<string, unknown>): Record<string, unknown> => ({
  */
 const rebuildRun = async (over: Partial<RunGoalConfig> = {}): Promise<Awaited<ReturnType<typeof runGoal>>> => {
   const cwd = mkdtempSync(join(tmpdir(), 'omd-criterion-rebuild-'));
-  writeFileSync(join(cwd, 'out.txt'), 'OK\n');
+  seedRepo(cwd);
   return rebuildRunIn(cwd, undefined, over);
 };
 
@@ -243,7 +321,7 @@ const rebuildRunIn = async (
       tier: 'simple',
       acceptance: { kind: 'executable', command: 'grep -q OK missing-dir/out.txt', expectExit: 0 },
     })) as RunGoalConfig['_classify'],
-    _rebuildCriterion: (async () => ({ command: 'grep -q OK out.txt', expectExit: 0 })) as RunGoalConfig['_rebuildCriterion'],
+    _rebuildCriterion: (async () => ({ command: REBUILT, expectExit: 0 })) as RunGoalConfig['_rebuildCriterion'],
     _runDag: (async (plan: ConductorPlan, dagCfg: ExecutorDagConfig): Promise<ExecutorDagResult> => {
       const results = {
         conductor: leaf({ id: 'conductor', filesTouched: [join(cwd, 'out.txt')], artifactRoot: cwd }),
@@ -268,7 +346,7 @@ describe('INV-4 接线 (GWT-4): 终审否决 target=criterion ⇒ 走判据重�
 
   test('★ 重建出的判据过了全部自证门才记 admitted, 且原文带出来', async () => {
     const r = await rebuildRun();
-    expect(r.criterionRebuild!.proposed).toBe('grep -q OK out.txt');
+    expect(r.criterionRebuild!.proposed).toBe(REBUILT);
     expect(r.criterionRebuild!.admitted).toBe(true);
   });
 
@@ -278,6 +356,16 @@ describe('INV-4 接线 (GWT-4): 终审否决 target=criterion ⇒ 走判据重�
     });
     expect(r.criterionRebuild!.admitted).toBe(false);
     expect(r.criterionRebuild!.why).toContain('路径参数不存在');
+  });
+
+  test('★ O1 接线 (INV-7): 候选锚在引擎自己的 `.omd/` 哨兵上 ⇒ 不准入, 拒因原文进 result', async () => {
+    // 证伪: 把 gates 里那道「仓内锚定」删掉 → 本条由红转绿 (admitted 变 true)。
+    const r = await rebuildRun({
+      _rebuildCriterion: (async () => ({ command: 'test -f .omd/conductor-readonly-sentinel', expectExit: 0 })) as RunGoalConfig['_rebuildCriterion'],
+    });
+    expect(r.criterionRebuild!.admitted).toBe(false);
+    expect(r.criterionRebuild!.why).toContain('仓内锚定');
+    expect(r.criterionRebuild!.why).toContain('.omd/');
   });
 
   test('★ 判别力: 重建者缺席 (没注入 / 无 agentRunner) ⇒ 触发照记, 但不假装重建过', async () => {
@@ -334,7 +422,7 @@ describe('INV-4 回写: 采纳的判据冻进下一轮 (本轮终态不动)', ()
   /** 带 continuity.runId 的一次 rebuildRun —— 没有它 statePath 是 undefined, saveState 空转。 */
   const runWithState = async (over: Partial<RunGoalConfig> = {}) => {
     const cwd = mkdtempSync(join(tmpdir(), 'omd-criterion-writeback-'));
-    writeFileSync(join(cwd, 'out.txt'), 'OK\n');
+    seedRepo(cwd);
     const runId = 'wb-run';
     const r = await rebuildRunIn(cwd, runId, over);
     return { cwd, runId, r };
@@ -344,10 +432,10 @@ describe('INV-4 回写: 采纳的判据冻进下一轮 (本轮终态不动)', ()
     const { cwd, runId, r } = await runWithState();
     expect(r.criterionRebuild!.admitted).toBe(true);
     const st = stateOf(cwd, runId) as { classified: { acceptance: { command: string } }; criterionHistory: { from: string; to: string; trigger: string }[] };
-    expect(st.classified.acceptance.command).toBe('grep -q OK out.txt');
+    expect(st.classified.acceptance.command).toBe(REBUILT);
     expect(st.criterionHistory).toHaveLength(1);
     expect(st.criterionHistory[0]!.from).toBe('grep -q OK missing-dir/out.txt');
-    expect(st.criterionHistory[0]!.to).toBe('grep -q OK out.txt');
+    expect(st.criterionHistory[0]!.to).toBe(REBUILT);
     expect(st.criterionHistory[0]!.trigger).toContain('criterion');
   });
 

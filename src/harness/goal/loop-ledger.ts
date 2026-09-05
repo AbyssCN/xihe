@@ -20,6 +20,7 @@ export type ConductorCardName = 'work' | 'spawn' | 'map' | 'explore' | 'best_of'
 import type { AcceptanceProbe } from './acceptance-gate';
 import type { CriterionSurveyFacts } from './criterion-survey';
 import type { CriterionConsensus } from './criterion-consensus';
+import type { RunnerReady } from './runner-ready';
 
 export interface LoopDispatch {
   seq: number;
@@ -296,6 +297,15 @@ export interface LoopLedger {
    * / 三发全挂回落了单发那条路), **不是**「开了但一致性为 0」—— 后者是 `agreement: 0` (§静默坑 1)。
    */
   criterionConsensus?: CriterionConsensus;
+  /**
+   * runner 就绪预检读数 (W3, 2026-09-06, 见 `./runner-ready`)。
+   *
+   * 挂这里的理由同上面几格: 只有 `r.loop` 整份 JSON 出得了 bench 容器。
+   * ⚠ 整格缺席 = **没跑预检** (走的不是编排循环 / 老记录), **不是**「探过且不适用」——
+   * 后者是 `runner: null` (§静默坑 1)。`installed` 那一格的三态见 {@link RunnerReady}。
+   * 契约预注册要收的正是「`installed` 次数」与「No module named pytest」题数这一对。
+   */
+  runnerReady?: RunnerReady;
 
   cards: Omit<ConductorCardLedger, 'dispatches' | 'residentPromptChars' | 'criterionFreeze' | 'criterionDirection'>;
   dispatches: LoopDispatch[];
