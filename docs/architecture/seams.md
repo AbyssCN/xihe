@@ -109,7 +109,7 @@ leaf prompt 整形 seam: 注入 leaf 上下文/前缀/压缩级与档位闸 (省
 
 | 字段 | 必填 | 类型 | 一句话 | 消费方 (前3) |
 |---|---|---|---|---|
-| `sessionId` |  | `string` | 本次 run 的 Langfuse trace 分组 session id (conductor+leaf 全部经 send 归此 session)。 | `src/tui/tui.ts`<br>`src/tui/backend-embedded.ts`<br>`src/harness/chat/agent.ts` (33 文件) |
+| `sessionId` |  | `string` | 本次 run 的 Langfuse trace 分组 session id (conductor+leaf 全部经 send 归此 session)。 | `src/tui/tui.ts`<br>`src/tui/backend-embedded.ts`<br>`src/harness/chat/agent.ts` (34 文件) |
 | `onComplete` |  | `(result: ExecutorDagResult) => void \| Promise<void>` | 运行完成钩子 (留痕层接口)。 | `src/mcp/tools/dag-tools.ts`<br>`src/harness/dag/engine.ts`<br>`src/mcp/tools/compose.ts` (5 文件) |
 | `onNodeEvent` |  | `(e: DagNodeEvent) => void` | 节点级进度事件 (2026-07-20, MCP 派发简报/活体 status 的数据源): planned = 图定型 (全部节点 id+kind, 每轮 plan/escalation 重规划各发一次) start = 节点起跑 … | `src/mcp/tools/dag-tools.ts`<br>`src/mcp/tools/fleet.ts`<br>`src/mcp/assemble.ts` (6 文件) |
 | `continuity` |  | `{ manager: CheckpointManager; runId: string; resume?: boo…` | W2 continuity (SDD C4): 节点级 checkpoint 写入磁盘 + 崩溃恢复跳过。 | `src/harness/dag/engine.ts`<br>`src/mcp/tools/dag-tools.ts`<br>`src/mcp/tools/goal.ts` (7 文件) |

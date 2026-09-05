@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 /**
- * scripts/goal-worker —— `dag_goal detached=true` 的**脱离会话工作进程** (S2 后半 / D-W, 2026-08-03)。
+ * scripts/goal-worker —— `dag_goal detached=true` 的**脱离会话工作进程** (S2 后半 / D-W, 2026-08-03);
+ * 切片 2 (2026-09-05): 加 `--tool <name>` 与 `--args-json '<obj>'`,通用承接 `omd call` / `omd run --detached`。
  *
  * ## 为什么需要它
  *
@@ -9,7 +10,7 @@
  * 「无人值守跑真活」在那条路上**物理上不成立**, 不管引擎本身多结实。
  *
  * 本进程是**第二个适配器**, 不是第二套引擎: 它照 `omd mcp` 的引导序起来, 装同一份
- * `assembleOmdMcpTools`, 调同一个 `dag_goal` 工具。零新执行路径 —— stamp / 闸 / checkpoint /
+ * `assembleOmdMcpTools`, 调目标工具 (默认 `dag_goal`)。零新执行路径 —— stamp / 闸 / checkpoint /
  * 留痕 / 毒集全部照旧。(本仓最贵的教训之一就是"第二套语义", 见 `iterateExecutorDag` 那条。)
  *
  * ## 三条必须与 `omd mcp` 逐字一致的引导 (错一条就是两套行为)
@@ -27,9 +28,18 @@
  * **把属主 pid 改成自己** (经 registry 的 start/resume), 于是任何后来的 session hydrate 时看到的是
  * "running 且属主活着" —— 而不是"属主死了 → 判成被打断"。母进程随时可以走。
  *
+ * ## 转发矩阵 (切片 2)
+ *
+ * 转发矩阵必须与母进程 spawn cmd 一一对应 —— 漏一格 = 参数矩阵空格 (P0 2026-08-10 branch 同形)。
+ * 两条路:
+ *  · `--tool dag_goal` (默认) + 现有 flag 表 → `buildHandlerArgs(argv)`
+ *  · `--tool <name>` + `--args-json '<obj>'` → 直接 JSON.parse,不走 flag 矩阵
+ * 第二条路给 `omd call` / `omd run --detached` 用 —— 不可能为每个工具都列一份 flag 翻译。
+ *
  * 用法 (通常由 `dag_goal detached=true` 起, 手动跑也行):
  *   bun run scripts/goal-worker.ts --run-id <id> --cwd <dir> --goal "..." [--tier simple|complex]
  *                                  [--max-rounds N] [--research-rounds N] [--slug <map-slug>]
+ *                                  [--tool <name>] [--args-json '<obj>']
  */
 import { bootstrapModelRuntime } from '../src/model/bootstrap';
 import { assembleOmdMcpTools } from '../src/mcp/assemble';
@@ -85,6 +95,40 @@ export const buildHandlerArgs = (argv: string[]): Record<string, unknown> => {
   };
 };
 
+/**
+ * 切片 2: 把 `--tool <name>` + `--args-json '<obj>'` 解析成 (tool, args) 二元组。
+ * 纯函数;非 dag_goal 走 args-json 直通,dag_goal 缺 args-json 时退回 buildHandlerArgs 兼容旧 spawn。
+ *
+ * JSON 解析失败 → 抛 (主流程接住即响亮退出 2,与「--run-id 与 --goal 必填」同源)。
+ */
+export function resolveToolAndArgs(
+  argv: string[],
+): { tool: string; args: Record<string, unknown> } {
+  const opt = (name: string): string | undefined => {
+    const i = argv.indexOf(`--${name}`);
+    return i >= 0 ? argv[i + 1] : undefined;
+  };
+  const tool = opt('tool') ?? 'dag_goal';
+  const argsJson = opt('args-json');
+  if (argsJson !== undefined) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(argsJson);
+    } catch (e) {
+      throw new Error(`--args-json 解析失败: ${(e as Error).message}`);
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('--args-json 必须是 JSON 对象');
+    }
+    return { tool, args: parsed as Record<string, unknown> };
+  }
+  if (tool === 'dag_goal') {
+    return { tool, args: buildHandlerArgs(argv) };
+  }
+  // 非 dag_goal 又没给 args-json → 让主流程以「缺参」响亮拒(同源用法错误,exit 2)。
+  throw new Error(`--tool ${tool} 必须配 --args-json '<obj>' (非 dag_goal 工具无 flag 翻译)`);
+}
+
 // 主流程收进 import.meta.main: 测试 import 本模块只取 buildHandlerArgs, 不触发 argv 校验/起跑。
 if (import.meta.main) {
   const argv = process.argv.slice(2);
@@ -94,9 +138,24 @@ if (import.meta.main) {
   };
 
   const runId = opt('run-id');
-  const goal = opt('goal');
   const cwd = opt('cwd') ?? process.cwd();
-  if (!runId || !goal) {
+  if (!runId) {
+    console.error('goal-worker: --run-id 必填');
+    process.exit(2);
+  }
+
+  let resolved: { tool: string; args: Record<string, unknown> };
+  try {
+    resolved = resolveToolAndArgs(argv);
+  } catch (e) {
+    console.error(`goal-worker: ${(e as Error).message}`);
+    process.exit(2);
+  }
+  const { tool, args } = resolved;
+
+  // 旧约定保持: dag_goal 必须有 goal(向后兼容老 spawn 形态 —— 即便只是借道首跑也得有题面)。
+  // 非 dag_goal 的工具不卡这一条,args-json 解析过了就算合法。
+  if (tool === 'dag_goal' && !(typeof args.goal === 'string' && args.goal.length > 0)) {
     console.error('goal-worker: --run-id 与 --goal 必填');
     process.exit(2);
   }
@@ -109,33 +168,26 @@ if (import.meta.main) {
   // 并把属主 pid 换成自己, 后来的 session 才看得到一个"活着的 run"而不是一个孤儿。
   const registry = new RunRegistry(undefined, { store: createRunStore({ path: join(cwd, '.omd', 'runs.db') }) });
   const tools = assembleOmdMcpTools({ cwd, runRegistry: registry });
-  const goalTool = tools.find((t) => t.name === 'dag_goal');
-  if (!goalTool) {
-    console.error('goal-worker: 装配里没有 dag_goal (assemble 变了?)');
+  const targetTool = tools.find((t) => t.name === tool);
+  if (!targetTool) {
+    console.error(`goal-worker: 装配里没有 ${tool} (assemble 变了?)`);
     process.exit(2);
   }
 
-  // `dag_goal` 是 fire-and-forget (三段式: 起跑即返回 runId), 所以这里**必须等到终态**才能退 ——
+  // dag_goal 是 fire-and-forget (三段式: 起跑即返回 runId), 所以这里**必须等到终态**才能退 ——
   // 进程一退, 在飞的活就跟着没了, 那正是本进程存在的理由。
-  //
-  // **为什么首次跑也走 `resume` 这个参数名**: 它是工具面上唯一能"用调用方给的 runId 起一个 run"
-  // 的口子, 而 detached 的 runId 必须由母进程先生成 (它要立刻回给调用方)。对**未知** runId,
-  // `reopenForResume` 的语义正是 register + start —— 也就是我们要的那件事, 且属主 pid 记的是
-  // **本进程**。
-  //
-  // ⚠ **S3 / C-3 / D-1 (2026-08-25, #251) 改正**: 旧注释 ("附带的 `continuity.resume=true` 对新
-  // run 是 no-op") 是错的 —— run-goal.ts:912 的 `resuming = config.dag.continuity?.resume === true`
-  // 在**没有任何 checkpoint 的新 run**上不是 no-op: 它会让 #242 已绿切片降级 + O-6 vacuous 探针
-  // 在首跑上误触, 预绿切片被判「活已干完」降为 command 重验, O-6 探针被绕过 → 零改动假 done
-  // (站票 run 85a18995: 4 分钟零改动假 done; run bca0a0c7: bun test 多 filter 静默忽略, 二次假 done)。
-  // 修法不在 worker, 在 handler (goal.ts): 真 resume = 盘上证据 (registry 有该 runId 记录 ∨
-  // `_fixpoint.json` 在场), 两证据都缺 = 借道首跑, `continuity.resume` 不注入。worker 这条路只
-  // 走借道首跑, 所以永远不注入 (handler 内已判完)。
-  // (不为此新增一个参数: 一个已有语义能表达的事不该有两个入口。)
-  const res = (await goalTool.handler(
-    buildHandlerArgs(argv) as never,
+  // 非 dag_goal (例如 solve/run 等单发工具) 由 handler 自己决定同步语义,这里不强制 wait。
+  const res = (await targetTool.handler(
+    args as never,
     {} as never,
   )) as { content: { text: string }[]; isError?: boolean };
+
+  if (tool !== 'dag_goal') {
+    // 非 goal 工具 = 单发,直接 stdout 输出 handler 文本内容 + 同步 exit。
+    // stdout(不放日志,日志走 stderr;CLI `call` 接管 stdout 拿到结果)。
+    process.stdout.write(res.content.map((c) => c.text).join('\n'));
+    process.exit(res.isError ? 1 : 0);
+  }
 
   if (res.isError) {
     console.error(`goal-worker: dag_goal 拒绝起跑 — ${res.content[0]?.text ?? ''}`);

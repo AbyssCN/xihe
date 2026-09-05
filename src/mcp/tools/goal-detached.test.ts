@@ -20,7 +20,7 @@ import { createGoalTool } from './goal';
 import { RunRegistry } from '../run-registry';
 import { CheckpointManager } from '../../harness/continuity/checkpoint-manager';
 import type { RunGoalResult } from '../../harness/goal/run-goal';
-import { buildHandlerArgs } from '../../../scripts/goal-worker';
+import { buildHandlerArgs, resolveToolAndArgs } from '../../../scripts/goal-worker';
 
 const neverRuns = async (): Promise<RunGoalResult> => {
   throw new Error('detached 路径不该在母进程里跑 runGoal');
@@ -225,5 +225,25 @@ describe('detached × slug (cb4a129 六留账: 显式 slug 双端转发)', () =>
 
   test('G-2 worker 侧: 不带 --slug → 参数无 slug 键 (缺省语义逐字节不变)', () => {
     expect('slug' in buildHandlerArgs(['--run-id', 'r1', '--goal', 'g'])).toBe(false);
+  });
+});
+
+// 切片 2 (2026-09-05): worker 端 --tool / --args-json 直通。
+// MCP `dag_goal` 这条 path 仍走 buildHandlerArgs (--tool 缺省即 dag_goal),不传 --args-json;
+// 但 `omd solve --detached` 与 `omd run --detached` / `omd call` 走 worker 的新形 ——
+// 必须验证 MCP 侧的转发矩阵**没漂**(老 spawn 不带 --tool/--args-json 也跑得通)。
+describe('切片 2 · worker resolveToolAndArgs 对 MCP 老 spawn 的兼容 (无 --tool/--args-json 也要走得通)', () => {
+  test('MCP 老 spawn 形态(无 --tool, 无 --args-json)→ resolveToolAndArgs 仍回 (dag_goal, buildHandlerArgs(argv))', () => {
+    const argv = ['--run-id', 'r1', '--cwd', '/w', '--goal', 'g', '--tier', 'simple', '--max-rounds', '3'];
+    const r = resolveToolAndArgs(argv);
+    expect(r.tool).toBe('dag_goal');
+    expect(r.args).toEqual(buildHandlerArgs(argv));
+  });
+
+  test('MCP 老 spawn 形态带 --slug → resolveToolAndArgs 透传 slug (cb4a129 同款)', () => {
+    const argv = ['--run-id', 'r1', '--cwd', '/w', '--goal', 'g', '--slug', 'x'];
+    const r = resolveToolAndArgs(argv);
+    expect(r.tool).toBe('dag_goal');
+    expect(r.args.slug).toBe('x');
   });
 });

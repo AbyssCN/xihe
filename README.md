@@ -38,6 +38,11 @@ cd <your-project> && claude mcp add omd -- omd mcp
 
 `omd init` asks for keys, offers three preset model matrices, probes each provider, and writes `.env`. First server start drops 22 skills into `~/.claude/skills/` — idempotent, never clobbers one you edited. Not on npm yet, so the clone is the install.
 
+After install, **`omd` is a CLI first, MCP server second**. The same `omd` binary runs every MCP
+tool as a named subcommand, an escape hatch (`omd call`), and a diagnostic (`omd doctor`) — so
+cron, CI, TUI and any non-MCP host can drive the engine without spawning an MCP server. See
+the [CLI guide](docs/guide/cli.md) for the full command reference.
+
 Then tell your agent: *read `docs/driving-omd.md`, then use omd to…* — that file is the operating guide, written for the agent rather than for you.
 
 ## Where omd sits
@@ -120,7 +125,7 @@ Cross-family best-of-N with a hard gate on the end, and you chose every seat in 
 |---|---|
 | [Driving omd](docs/driving-omd.md) | the operating guide — hand it to your agent |
 | [Why omd exists](docs/why-omd.md) | the long argument: which layer, and who decides correctness |
-| [Getting started](docs/guide/getting-started.md) · [MCP tools](docs/guide/mcp-tools.md) · [Model config](docs/guide/model-config.md) · [Skills](docs/guide/skills.md) · [Deep research](docs/guide/deep-research.md) | install, the tool surface, the seats |
+| [Getting started](docs/guide/getting-started.md) · [CLI guide](docs/guide/cli.md) · [MCP tools](docs/guide/mcp-tools.md) · [Model config](docs/guide/model-config.md) · [Skills](docs/guide/skills.md) · [Deep research](docs/guide/deep-research.md) | install, the CLI / tool surface, the seats |
 | [Architecture](docs/architecture/overview.md) · [DAG engine](docs/architecture/dag-engine.md) · [Goal loop](docs/architecture/goal-loop.md) · [Primitives](docs/architecture/primitives.md) | node kinds, the four pure passes, scheduling, isolation |
 | [Silent failures](docs/silent-failures.md) | every defect family this engine shipped with no red light |
 
