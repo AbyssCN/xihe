@@ -252,6 +252,15 @@ export interface ClassifyPromptProbe {
    * 那条**反向**教学句上去。
    */
   envFacts?: EnvFacts;
+  /**
+   * 仓内契约线索 (2026-09-05, `./criterion-survey` 机械勘察出来的那份原文)。
+   *
+   * 为什么要它: 分类器此前读不到 README 写死的键名、读不到仓里已经在测这些键的用例 ——
+   * 判据写错方向的根因是**输入缺失**。给了这段, 它才有材料把判据指向仓里已有的契约。
+   *
+   * 缺席 / 空串 / 全空白 ⇒ prompt 与加这一段之前**逐字相同** (加尺子不许动老读数的底线)。
+   */
+  survey?: string;
 }
 
 /**
@@ -337,6 +346,23 @@ export function classifyPrompt(goal: string, probe?: ClassifyPromptProbe): strin
           `  · 启用的语言包: ${[p.hasPython ? 'python' : null, p.hasJs ? 'js' : null].filter(Boolean).join(' + ') || '(都无)'}`,
           '验收命令首词必须属于「当前白名单 ∩ 该仓启用的语言包」的并集 —— 拿不准就在白名单里选 base 词',
           '(grep / cat / git …), 不要硬造一条不属于该仓语言的判据。',
+        ].join('\n')
+      : '';
+  // 仓内契约线索段 (2026-09-05) —— 排在语言证据段**之后**: 证据面按"从环境到契约"读,
+  // 先知道这仓跑什么, 再知道这仓已经写死了什么。
+  // ⚠ 缺席 / 空白必须整段不出现 —— 空壳头行也不行 (那会让对照臂的 prompt 字节变了,
+  // 于是勘察臂与对照臂的差再也分不清是勘察带来的还是文案漂移)。
+  const surveySection =
+    probe?.survey && probe.survey.trim() !== ''
+      ? [
+          '',
+          probe.survey,
+          '',
+          '判据优先指向既有测试文件里已经在测这些标识符的用例 (`pytest -q tests/x.py::test_y` 这种形状),',
+          '不要在已有测试覆盖时另写新文件 —— 自己新写的测试, 自己一定过得了。',
+          'README / docs 里写明的输出格式、键名、命令行参数、文件名, 是判据必须核的契约:',
+          '执行型就指向或新写断言这些键的测试; rubric 就把它们逐条列进 checklist。',
+          '既有测试与文档都没覆盖时才新写测试文件, 并在判据命令里写明文件名。',
         ].join('\n')
       : '';
   return [
@@ -443,6 +469,7 @@ export function classifyPrompt(goal: string, probe?: ClassifyPromptProbe): strin
     '       "route"?:{"kind":"none"}|{"kind":"chain","chain":{"stages":[{"id":string,"word":string,"goal"?:string,"command"?:string}]}}}',
     '',
     evidenceSection,
+    ...(surveySection ? [surveySection] : []),
     '',
     `目标: ${goal}`,
   ].join('\n');
@@ -500,9 +527,14 @@ async function classifyGoalCore(
      * 省略 = 退回空目录形态 (fail-open, 原因进 why)。
      */
     repoRoot?: string;
+    /**
+     * 仓内契约线索原文 (2026-09-05, `./criterion-survey` 的 `text`)。原样进 `classifyPrompt`。
+     * 缺席 / 空串 ⇒ 那一发的 prompt 与加这一段之前逐字相同。
+     */
+    survey?: string;
   },
 ): Promise<GoalClassification> {
-  const { generate, model, runCommand, repoRoot } = deps;
+  const { generate, model, runCommand, repoRoot, survey } = deps;
   if (!generate || !model) {
     return {
       tier: 'complex',
@@ -524,7 +556,12 @@ async function classifyGoalCore(
       '[omd/goal] 仓环境真探测 (语言证据 + PATH 上的 runner)',
     );
   }
-  const probe: ClassifyPromptProbe | undefined = repoRoot ? { repoRoot, ...(envFacts ? { envFacts } : {}) } : undefined;
+  // 勘察在场时也要造 probe —— 哪怕没给 repoRoot: 那两件事各自独立 (一个是环境证据, 一个是契约线索),
+  // 用 repoRoot 门控 survey 会让它在没有仓根的调用上被静默吞掉。
+  const probe: ClassifyPromptProbe | undefined =
+    repoRoot || survey
+      ? { ...(repoRoot ? { repoRoot } : {}), ...(envFacts ? { envFacts } : {}), ...(survey ? { survey } : {}) }
+      : undefined;
   const blockOpts: AcceptanceCommandBlockOpts = repoRoot ? { root: repoRoot, ...(envFacts ? { envFacts } : {}) } : {};
 
   const ask = async (correction: string): Promise<GoalClassification> => {

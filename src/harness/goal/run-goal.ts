@@ -102,6 +102,7 @@ import {
 } from './orchestrating-loop';
 import type { AcceptanceProbe } from './acceptance-gate';
 import { countExistingTestsTouched, createConductorCardLedger, withDispatchEvidence, type ConductorCardLedger, type LoopLedger } from './loop-ledger';
+import { surveyForCriterion, type CriterionSurvey } from './criterion-survey';
 import { conductorCtxOf, withLoopConfig, type LoopHost } from './loop-run';
 
 // D-I: 两条轴的类型与分类器都归 ./acceptance (那里是判据轴的单一真源); 此处 re-export 保旧调用面。
@@ -1394,11 +1395,27 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   //   「验收分型未成立: 无分类器 (缺 generate/model)」
   // ——机制在、测试全绿、生产零生效, 正是这仓一直在杀的空旋钮形态, 而这次空掉的是防作弊的地基。
   // 闸 C: goal 未变的续跑直接用上次的分类 (探针首跑已验过; 重分类 = 重烧一遍还可能分出不同的判据轴)。
+  //
+  // 勘察先于分类 (2026-09-05, D-3): 分类之前跑一次**零 LLM 只读勘察** (README / 既有测试清单 /
+  // goal 点名的标识符在仓里的位置), 把仓内契约线索原样喂进那一发。判据写错方向的根因是
+  // **输入缺失** —— 分类器此前只看得见 goal 文本, 于是它把判据指向自己编出来的新文件, 而真契约
+  // (README 里逐字写着的输出键名 / 仓里已经在测这些键的用例) 它从来没读到过。
+  // ⚠ 只在**真分类**这条路上跑: 注入 `_classify` 的调用方自己定判据, 闸 C 复用时那一发压根不发 ——
+  // 两条路都没有"勘察给谁看"的对象。缺席 (undefined) 与"跑了三段全空"(全 0) 是两件事。
+  let survey: CriterionSurvey | undefined;
+  let surveyError: string | undefined;
   const classified = prior
     ? prior.classified
     : await (config._classify ??
-      ((g: string) =>
-        classifyGoal(g, {
+      ((g: string) => {
+        try {
+          survey = surveyForCriterion(g, config.cwd);
+        } catch (e) {
+          // fail-open 但留证据 (仓规静默坑 2): 勘察炸了照常分类, 只是这一发少一段证据。
+          surveyError = String(e);
+          logger.warn({ err: surveyError, root: config.cwd }, '[omd/goal] 分类前勘察失败 → 本次不带仓内契约线索');
+        }
+        return classifyGoal(g, {
           generate: config.dag.generate ?? makeDefaultGenerate(config.dag.sessionId ?? randomUUID()),
           model: config.dag.conductorModel,
           // **空世界自检** (2026-07-31, G4): 活还没干之前先跑一遍判出的验收命令 —— 这时候就过 =
@@ -1409,7 +1426,10 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
           // repoRoot 它就退回空目录, 而空目录里任何仓内判据都必然失败 ⇒ 探针恒判「分得出」
           // (账本读数: 真跑过的 69 跑里它红过 0 次)。这一行就是那条 wire。
           repoRoot: config.cwd,
-        })))(goal);
+          // 勘察空手 (三段全空) 时不传 —— 那一发的 prompt 与加这一段之前逐字相同 (D-2)。
+          ...(survey?.text ? { survey: survey.text } : {}),
+        });
+      }))(goal);
   // 探针裁决钩子: 分类定稿后恰好调一次 (含 fallback / 探索型), 进 `_runDag` 与任何运行记录之前。
   // `_classify` 抛错时这行到不了 → 天然不调, 不存在"抛错也硬调"的路径。
   config.onClassified?.(classified);
@@ -1451,6 +1471,12 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
       // 判据换了来源要在摘要上看得见: 分类器编的那条与 SDD verify 列的差距, 正是 7d50fda2
       // 那次幻觉路径唯一能被人一眼看出的地方 (它当时只活在图里, 摘要上什么都没写)。
       (acceptance === sddAcceptance ? ' · 判据取自 SDD verify 列 (非分类器)' : '') +
+      // 勘察读数上摘要 (D-3): 摘要是人第一眼看的地方, 「这次分类看到了什么」不该只活在 prompt 里。
+      // 缺席 = 没跑勘察 (注入式分类器 / 闸 C 复用), 与"跑了三段全空"分得开 (仓规静默坑 1)。
+      (survey
+        ? ` · 勘察: README ${survey.facts.readme ? '是' : '否'} · 测试文件 ${survey.facts.testFiles} · 标识符 ${survey.facts.terms}/${survey.facts.termHits} 命中${survey.why ? ` · 勘察失败: ${survey.why}` : ''}`
+        : '') +
+      (surveyError ? ` · 勘察失败: ${surveyError}` : '') +
       (prior ? ' · 复用续跑前分类 (goal 未变, 闸 C)' : ''),
   });
   // 闸 C: 分类一定稿就落状态 (契约段中途炸也不用重分类; 契约段成了再补 contract 字段)。
@@ -2682,6 +2708,8 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
         // #205 ①: 判据自证裁决进 **loop** 而不是结果顶层 —— 只有 loop 整份 JSON 出得了 bench 容器
         // (code80-p6 实测: 挂顶层时 68 题全缺席)。顶层那份保留, 给非 bench 调用方读。
         ...(classified.acceptanceProbe ? { acceptanceProbe: classified.acceptanceProbe } : {}),
+        // 勘察读数 (D-4): 同样只有挂在 loop 上才出得了 bench 容器。缺席 = 没跑勘察, 不是全 0。
+        ...(survey ? { criterionSurvey: { ...survey.facts, ...(survey.why ? { why: survey.why } : {}) } } : {}),
         // #205 第三刀: 执行体改了几个仓库自带的测试文件 (环外信号, 只记账不拦)。
         // `git cat-file -e HEAD:<path>` 判「改动前存在」; 非 git 仓 / git 调不通 → null, 不是 0。
         existingTestsTouched: countExistingTestsTouched(

@@ -18,6 +18,7 @@ import type { JudgingTruths } from '../verifier';
 export type ConductorCardName = 'work' | 'spawn' | 'map' | 'explore' | 'best_of' | 'research' | 'decompose';
 
 import type { AcceptanceProbe } from './acceptance-gate';
+import type { CriterionSurveyFacts } from './criterion-survey';
 
 export interface LoopDispatch {
   seq: number;
@@ -212,6 +213,15 @@ export interface LoopLedger {
    * (账本 `dag-runs.db` 那条路更早就不通: 库在 omd home, `omd-state.tgz` 只扫 `<cwd>/.omd`。)
    */
   acceptanceProbe?: AcceptanceProbe;
+  /**
+   * 分类前机械勘察的读数 (2026-09-05, 见 `./criterion-survey`)。
+   *
+   * **挂在这里而不是结果顶层**, 与上面 `acceptanceProbe` 同一条理由: `resultOut` 只序列化
+   * `r.loop` 整份 JSON, 顶层字段出不了 bench 容器 (`runs/2026-09-04-criterion-direction-result.md` §①)。
+   * ⚠ 整格缺席 = **没跑勘察** (注入式分类器 / 闸 C 复用上次分类); 跑了三段全空 = 各项全 0 ——
+   * 两者别并掉 (§静默坑 1)。`why` 在场 = 有段失败或撞墙钟, 原文在里面。
+   */
+  criterionSurvey?: CriterionSurveyFacts & { why?: string };
 
   cards: Omit<ConductorCardLedger, 'dispatches' | 'residentPromptChars' | 'criterionFreeze' | 'criterionDirection'>;
   dispatches: LoopDispatch[];
