@@ -536,7 +536,7 @@ function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () 
       if (ledger) {
         ledger.ok++;
         ledger.byCard[card.name as ConductorCardName] = (ledger.byCard[card.name as ConductorCardName] ?? 0) + 1;
-        const facts = computeLoopDispatchFacts(plan, exec);
+        const facts = computeLoopDispatchFacts(plan, exec, deps.ctx.cwd);
         ledger.dispatches.push({ ...dispatch, failed: Object.values(exec.results).filter((r) => r.status !== 'done').length, ...facts });
       }
       const summary = summarizeChildRun(exec, label);

@@ -12,6 +12,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { repoRelativePath } from '../repo-path';
 import type { RunGit } from '../dag/writeset-evidence';
 import type { JudgingTruths } from '../verifier';
 
@@ -87,14 +88,22 @@ export function reconcileWriteSets(declared: string[], touched: string[]): { dec
  */
 export function computeLoopDispatchFacts(
   plan: { nodes: Record<string, { write_set?: string[] }> },
-  exec: { results: Record<string, { filesTouched?: string[]; status: 'done' | 'failed' | 'skipped' }> },
+  exec: { results: Record<string, { filesTouched?: string[]; artifactRoot?: string; status: 'done' | 'failed' | 'skipped' }> },
+  /**
+   * 仓根 (2026-09-06): 把 leaf 上报的绝对路径按 `leaf.artifactRoot ?? root` 转成相对路径再对账。
+   * 缺席 = 不归一 (老调用零改动)。为什么必须归一见 `repo-path.ts` 头注: 两套写法逐字比不上 →
+   * 假 orphan / 假 missing → 判官「产物不存在」。
+   */
+  root?: string,
 ): { filesTouched: string[]; done: number; writeSet: { declared: string[]; orphan: string[]; missing: string[] } | null } {
   const filesTouched: string[] = [];
   const seenTouched = new Set<string>();
   let done = 0;
   for (const leaf of Object.values(exec.results)) {
     if (leaf.status === 'done') done++;
-    for (const f of leaf.filesTouched ?? []) {
+    const base = leaf.artifactRoot ?? root;
+    for (const raw of leaf.filesTouched ?? []) {
+      const f = repoRelativePath(base, raw);
       if (seenTouched.has(f)) continue;
       seenTouched.add(f);
       filesTouched.push(f);
@@ -106,7 +115,8 @@ export function computeLoopDispatchFacts(
   for (const node of Object.values(plan.nodes)) {
     if (!node.write_set) continue;
     anyDeclared = true;
-    for (const f of node.write_set) {
+    for (const raw of node.write_set) {
+      const f = repoRelativePath(root, raw);
       if (seenDeclared.has(f)) continue;
       seenDeclared.add(f);
       declared.push(f);

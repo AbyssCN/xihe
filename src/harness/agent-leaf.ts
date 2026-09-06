@@ -62,6 +62,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
+import { repoRelativePath } from './repo-path';
 import { homedir } from 'node:os';
 import { parseModelRef } from './fleet';
 /**
@@ -2297,18 +2298,21 @@ export function createAgentLeafRunner(opts: AgentLeafRunnerOpts = {}): AgentLeaf
               : typeof args.path === 'string' && args.path.trim()
                 ? args.path
                 : undefined;
-          if (p) step.path = p;
+          // 路径归一 (2026-09-06): 模型给的绝对路径落在 cwd 之内就记成相对路径, 与写集声明 / output_path /
+          // diff 证据同一套写法 —— 否则写集对账逐字比不上, 判官卷面出现「产物不存在」的假事实 (见 repo-path.ts)。
+          if (p) step.path = repoRelativePath(cwd, p);
           toolSteps.push(step);
           stepByCall.set(e.toolCallId, step);
         }
         if (FILE_WRITE_TOOLS.has(e.toolName)) {
           // hashline_edit 路径嵌在 patch 头 (`¶PATH#TAG`), 不是顶层 path —— 必须解析 patch, 否则漏记 → 假 empty-done。
-          const paths =
+          const paths = (
             e.toolName === 'hashline_edit' && typeof args.patch === 'string'
               ? hashlinePatchPaths(args.patch)
               : typeof args.path === 'string' && args.path.trim()
                 ? [args.path]
-                : [];
+                : []
+          ).map((x) => repoRelativePath(cwd, x));
           if (paths.length) {
             pathByCall.set(e.toolCallId, paths);
             // 写前快照。读盘失败 (权限 / 目录 / 竞态) 一律当"此前不存在" —— 本采集 fail-open,
@@ -2318,7 +2322,7 @@ export function createAgentLeafRunner(opts: AgentLeafRunnerOpts = {}): AgentLeaf
             snapByCall.set(e.toolCallId, snaps);
           }
         } else if (FILE_READ_TOOLS.has(e.toolName)) {
-          if (typeof args.path === 'string' && args.path.trim()) readByCall.set(e.toolCallId, args.path);
+          if (typeof args.path === 'string' && args.path.trim()) readByCall.set(e.toolCallId, repoRelativePath(cwd, args.path));
         }
         // W4 勘察步预算 (2026-09-06): 只对**持卡节点** (customTools 非空 = conductor) 生效。
         // 连读到预算还没派活 → 经 pendingGrindAdvice 注入一次派活提醒; **不拒任何调用**, 只注一次。
