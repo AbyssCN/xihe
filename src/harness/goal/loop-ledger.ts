@@ -20,7 +20,7 @@ export type ConductorCardName = 'work' | 'spawn' | 'map' | 'explore' | 'best_of'
 
 import type { AcceptanceProbe } from './acceptance-gate';
 import type { CriterionSurveyFacts } from './criterion-survey';
-import type { CriterionConsensus } from './criterion-consensus';
+import type { ConsensusWithUnion } from './criterion-union';
 import type { ImpactPackFacts } from './impact-pack';
 import type { RunnerReady } from './runner-ready';
 import type { CriterionAuthorResult } from './criterion-author';
@@ -373,8 +373,11 @@ export interface LoopLedger {
    * 挂这里的理由同上面两格: 只有 `r.loop` 整份 JSON 出得了 bench 容器。
    * ⚠ 整格缺席 = **没开共识** (`OMD_CRITERION_CONSENSUS` 不是 `1` / 注入式分类器 / 闸 C 复用上次分类
    * / 三发全挂回落了单发那条路), **不是**「开了但一致性为 0」—— 后者是 `agreement: 0` (§静默坑 1)。
+   *
+   * R6 (2026-09-06) 在这一格里加了 `union` —— 共识候选取并集的读数, 三态见 {@link ConsensusWithUnion}。
+   * 契约预注册要收的正是「`union.applied` 率」与「`union.paths` 分布」这一对。
    */
-  criterionConsensus?: CriterionConsensus;
+  criterionConsensus?: ConsensusWithUnion;
   /**
    * runner 就绪预检读数 (W3, 2026-09-06, 见 `./runner-ready`)。
    *

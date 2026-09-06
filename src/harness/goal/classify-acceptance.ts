@@ -47,8 +47,8 @@ import {
   chooseCandidate,
   directionSignature,
   surveyHits,
-  type CriterionConsensus,
 } from './criterion-consensus';
+import { unionCriterionCommands, type ConsensusWithUnion } from './criterion-union';
 import { tryResolveSeatModel } from '../../model/role-models';
 import { effectiveSeatSampling } from '../../model/seat-overrides';
 
@@ -111,8 +111,9 @@ export interface GoalClassification {
   /**
    * 三候选共识读数 (2026-09-05, 见 `./criterion-consensus`)。**缺席 = 没开共识**
    * (`OMD_CRITERION_CONSENSUS` 不是 `1`, 或三发全挂回落了单发那条路), 不是"开了但一致性为 0"。
+   * 其中 `union` 那一格见 {@link ConsensusWithUnion} (R6, 2026-09-06)。
    */
-  criterionConsensus?: CriterionConsensus;
+  criterionConsensus?: ConsensusWithUnion;
 }
 
 /**
@@ -312,6 +313,15 @@ function probeRepo(root: string): ProbeResult {
  */
 function consensusEnabled(): boolean {
   return process.env.OMD_CRITERION_CONSENSUS?.trim() === '1';
+}
+
+/**
+ * 共识候选取并集的开关 (R6, 契约 `docs/plan/2026-09-06-共识并集验收-执行契约.md`)。
+ * 同 {@link consensusEnabled} **只认字面 `1`** —— 它现在是单变量臂 `code80-m3-union` 的那个变量,
+ * 默认关: 缺席时验收命令与改前逐字节相同 (INV-5)。
+ */
+function unionEnabled(): boolean {
+  return process.env.OMD_CRITERION_UNION?.trim() === '1';
 }
 
 /** 坐标的 provider 前缀 (`claude-code:` / `openai-codex:` / `minimax-cn:` …)。同 provider 视为同族。 */
@@ -758,7 +768,7 @@ async function classifyGoalCore(
    * **只量, 不拦不升级** —— 歧义在本版只进账本 (`ambiguous`), 不改任何一条控制流。
    * 一份都没拿到 ⇒ `undefined`, 调用方回落共识关闭时的单发那条路 (失败语义原样不变)。
    */
-  const sampleConsensus = async (): Promise<{ chosen: GoalClassification; ledger: CriterionConsensus } | undefined> => {
+  const sampleConsensus = async (): Promise<{ chosen: GoalClassification; ledger: ConsensusWithUnion } | undefined> => {
     // D-1 的温度那一句今天发不出去: `GenerateFn` 这个接缝没有采样通道, 而 conductor 座的采样意图
     // (`model/seats.ts`) 恰好是空的 —— 两发同参, 发散来自 provider 自己的默认温度。
     // 座位真配了温度而这里发不出去时留一行: 一个到不了调用上的旋钮该出声, 不该静默消失。
@@ -787,7 +797,7 @@ async function classifyGoalCore(
     });
     const a = agreement(cands.map((c) => c.sig));
     const pick = chooseCandidate(cands);
-    const ledger: CriterionConsensus = {
+    const ledger: ConsensusWithUnion = {
       n: cands.length,
       crossFamily: cross !== undefined,
       kindAgreement: a.kindAgreement,
@@ -797,11 +807,34 @@ async function classifyGoalCore(
       kinds: cands.map((c) => c.sig.kind),
     };
     logger.info({ ...ledger, why: pick.why }, '[omd/goal] 判据三候选共识 (本版只量, 不拦不升级)');
-    return { chosen: got[pick.index]!, ledger };
+
+    const chosen = got[pick.index]!;
+    const acc = chosen.acceptance;
+    // R6 (D-1..D-4): 择优只留一份, 另两份指的测试目标就丢了 (实测 agreement 均值 0.21–0.37,
+    // 三份大多指不同文件)。开着开关就把它们的路径参数并进同一条命令 —— 加宽判据, 出题人还是执行侧自己。
+    // 只对执行型: rubric / 探索型没有"命令"这回事, 那时整格缺席而不是 `applied: false` (§静默坑 1)。
+    if (unionEnabled() && acc.kind === 'executable') {
+      const others = cands
+        .filter((_, i) => i !== pick.index)
+        .map((c) => c.spec)
+        .flatMap((s) => (s.kind === 'executable' ? [s.command] : []));
+      const { command, ...union } = unionCriterionCommands(acc.command, others, {
+        // D-2: 参与并集的候选必须过既有的命令闸。⚠ 这一道在**当前**接线下拒不掉任何一份 ——
+        // 候选是 `normalizeClassification` 用同一份 `blockOpts` 过过闸才成为执行型的, 所以
+        // `dropped` 的预期读数是 0。留着它是因为两处一旦分头改 (per-root opts / 产物集), D-2
+        // 就只剩这一道; 拿掉则并集会静默地比单份宽一档。同理 `green-before` 那一档在这里恒不触发:
+        // 探针跑在 `vet` 里, 此刻其余候选身上只可能有 normalize 的 `demoted` 读数, 而那种已不是执行型。
+        blocked: (cmd) => acceptanceCommandBlockReason(cmd, blockOpts),
+      });
+      ledger.union = union;
+      logger.info({ ...union, command }, '[omd/goal] 判据并集 (R6, 共识候选取并集)');
+      if (union.applied) return { chosen: { ...chosen, acceptance: { ...acc, command } }, ledger };
+    }
+    return { chosen, ledger };
   };
 
   /** 这次分类的共识读数; 共识没开 / 全挂时恒缺席。下面每条返回路径都经 {@link finish} 挂上它。 */
-  let consensus: CriterionConsensus | undefined;
+  let consensus: ConsensusWithUnion | undefined;
   const finish = (c: GoalClassification): GoalClassification => (consensus ? { ...c, criterionConsensus: consensus } : c);
 
   try {
