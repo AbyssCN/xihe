@@ -19,6 +19,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { IMPACT_PACK_HEADER } from './impact-pack';
 import { SURVEY_PACK_HEADER, buildSurveyPack } from './survey-pack';
 
 /** 真仓 (不是 mock): git init + 落文件 + 提交, 让 `git ls-files` / `git log` 有真输出。 */
@@ -109,5 +110,80 @@ describe('INV-1 fail-open —— 一段炸只丢那一段, 原因原文进 why',
     expect(pack.facts.sections).not.toContain('git');
     expect(pack.why).toBeUndefined();
     expect(pack.text).toContain('nogit');
+  });
+});
+
+/**
+ * 第七段「影响包」(2026-09-06, 契约 `docs/plan/2026-09-06-影响包-执行契约.md` D-2 / INV-4)。
+ *
+ * 反向自检: survey-pack 不加段 ⇒ 「sections 含 impact」红; 开关不读 ⇒ INV-4「前缀逐字节同旧」红;
+ * 封顶不按「impact 非空才放宽」分岔 ⇒ 「空包仍 ≤ 8000+200」与「非空包能过 8000」二者之一红。
+ */
+const IMPACT_FILES = {
+  'README.md': '# impact demo\n\n输出必须含 `build_report` 的表头。\n',
+  'tests/test_x.py': 'def test_x():\n    assert 1\n',
+  'src/app.py': 'import json\n\n\ndef build_report(rows):\n    total = sum(rows)\n    return json.dumps({"total": total})\n\n\ndef other():\n    return 2\n',
+  'src/cli.py': 'from app import build_report\n\n\ndef main(rows):\n    print(build_report(rows))\n',
+};
+const IMPACT_GOAL = '修 `build_report` 的表头, 见 src/app.py';
+
+/** 关掉影响包跑一趟 (env 是进程级的, 用完必须还原, 否则污染同文件后面的用例)。 */
+function withImpactOff<T>(fn: () => T): T {
+  const prev = process.env.OMD_IMPACT_PACK;
+  process.env.OMD_IMPACT_PACK = '0';
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.OMD_IMPACT_PACK;
+    else process.env.OMD_IMPACT_PACK = prev;
+  }
+}
+
+describe('D-2 —— 第七段 impact: 定义 / 调用者 / import 进勘察包', () => {
+  test('★ 影响包非空 ⇒ sections 含 impact, text 含定义整段, facts.impact 记读数', () => {
+    const { dir } = gitRepo(IMPACT_FILES);
+    const pack = buildSurveyPack(IMPACT_GOAL, dir, { run: realRun });
+
+    // 证伪: survey-pack 不加第七段 ⇒ 这四行红。
+    expect(pack.facts.sections).toContain('impact');
+    expect(pack.text).toContain(IMPACT_PACK_HEADER);
+    expect(pack.text).toContain('def build_report(rows):');
+    expect(pack.text).toContain('src/cli.py:5');
+    // 证伪: 读数不记 ⇒ 这两行红 (读数拿不到 = 没有这个读数)。
+    expect(pack.facts.impact?.defs).toBe(1);
+    expect(pack.facts.impact?.callers).toBeGreaterThanOrEqual(1);
+    // impact 排在标识符命中段**之后** (静态仓内事实在前, 要改的源码在后)。
+    expect(pack.text.indexOf(IMPACT_PACK_HEADER)).toBeGreaterThan(pack.text.indexOf('目标标识符在仓里的位置'));
+  });
+
+  test('★ INV-4 OMD_IMPACT_PACK=0 ⇒ 勘察包前缀逐字节同旧, 段名与读数都缺席', () => {
+    const { dir } = gitRepo(IMPACT_FILES);
+    const on = buildSurveyPack(IMPACT_GOAL, dir, { run: realRun });
+    const off = withImpactOff(() => buildSurveyPack(IMPACT_GOAL, dir, { run: realRun }));
+
+    expect(off.text).not.toContain(IMPACT_PACK_HEADER);
+    expect(off.facts.sections).not.toContain('impact');
+    expect(off.facts.impact).toBeUndefined();
+    // 证伪: 开关不读 / 影响包不是纯追加 ⇒ 本行红 (关掉那份必须是开着那份的前缀)。
+    expect(on.text.startsWith(off.text)).toBe(true);
+    expect(on.text.length).toBeGreaterThan(off.text.length);
+    // 关掉时封顶仍是老那个数 (8000), 没被新上限带走。
+    expect(off.text.length).toBeLessThanOrEqual(8000 + 200);
+  });
+
+  test('★ 封顶只在 impact 非空时放宽到 14000 (空则仍 ≤ 8000+200)', () => {
+    const bigDef = `def build_report(rows):\n${'    total = 0  # 凑长度的一行注释, 让定义块吃满 120 行封顶, 再多写几个字\n'.repeat(200)}`;
+    const { dir } = gitRepo({
+      ...IMPACT_FILES,
+      'README.md': `# impact big\n\n输出必须含 \`build_report\`。\n${'说明行, 用来把 README 段撑到 2500 字符的段上限, 再补上几个字。\n'.repeat(120)}`,
+      'src/app.py': `import json\n\n\n${bigDef}\n\ndef other():\n    return 2\n`,
+    });
+    const on = buildSurveyPack(IMPACT_GOAL, dir, { run: realRun });
+    const off = withImpactOff(() => buildSurveyPack(IMPACT_GOAL, dir, { run: realRun }));
+
+    expect(off.text.length).toBeLessThanOrEqual(8000 + 200);
+    // 证伪: 上限没放宽 ⇒ 本行红 (影响包会被老的 8000 截掉)。
+    expect(on.text.length).toBeGreaterThan(8000);
+    expect(on.text.length).toBeLessThanOrEqual(14000 + 200);
   });
 });

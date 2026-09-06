@@ -163,7 +163,13 @@ export function withLoopConfig(
   }
   // 读数进运行期账本 (回灌第二跑会覆盖为那一跑的值 —— 两跑各自算各自的包)。
   if (ledger && surveyPack) {
-    ledger.surveyPack = { chars: surveyPack.facts.chars, sections: surveyPack.facts.sections, ...(surveyPack.why ? { why: surveyPack.why } : {}) };
+    // 影响包读数一并提上来 (R2, 2026-09-06): 缺席 = 没算那一段, 与「算了没命中」是两件事 (§静默坑 1)。
+    ledger.surveyPack = {
+      chars: surveyPack.facts.chars,
+      sections: surveyPack.facts.sections,
+      ...(surveyPack.why ? { why: surveyPack.why } : {}),
+      ...(surveyPack.facts.impact ? { impact: surveyPack.facts.impact } : {}),
+    };
   }
   const face = buildConductorFace(
     {

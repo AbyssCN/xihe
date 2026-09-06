@@ -21,6 +21,7 @@ export type ConductorCardName = 'work' | 'spawn' | 'map' | 'explore' | 'best_of'
 import type { AcceptanceProbe } from './acceptance-gate';
 import type { CriterionSurveyFacts } from './criterion-survey';
 import type { CriterionConsensus } from './criterion-consensus';
+import type { ImpactPackFacts } from './impact-pack';
 import type { RunnerReady } from './runner-ready';
 
 export interface LoopDispatch {
@@ -188,6 +189,14 @@ export interface SurveyPackFacts {
   chars: number;
   sections: string[];
   why?: string;
+  /**
+   * 第七段影响包的读数 (2026-09-06, 见 `./impact-pack`)。
+   *
+   * 三态别压平 (§静默坑 1): 整格缺席 = **没算影响包** (`OMD_IMPACT_PACK=0` / 那一段炸了 /
+   * 老记录); 在场且 `defs: 0` = 算了但仓里没这几个定义 (词抽错或语言不支持)。
+   * 塌了归因就看这一格: 命中率低 = 抽取没找到定义, 命中率高而分没动 = 瓶颈不在上下文。
+   */
+  impact?: ImpactPackFacts;
 }
 
 export function createConductorCardLedger(): ConductorCardLedger {
