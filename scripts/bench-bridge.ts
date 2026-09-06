@@ -21,6 +21,7 @@
  */
 import type { ModelMessage, ModelRequest, ModelResponse } from '../src/model/types';
 import { runToolCallTurn, type OpenAiToolCall, type OpenAiToolDecl, type WireMessage } from '../src/model/claude-sdk-toolcall';
+import { createRateLimiter } from './bench-bridge-limiter';
 
 /**
  * 订阅 OAuth 座 (无 base URL + API key, 所以进不了字节级透传白名单)。
@@ -397,6 +398,10 @@ if (import.meta.main) {
   const { minimaxApiKey } = await import('../src/model/minimax-native');
   const { resolvePiApiKey } = await import('../src/model/pi-transport');
   const passthroughKey = minimaxApiKey() ?? (await resolvePiApiKey('minimax-cn'));
+  // MiniMax 出口令牌桶 (2026-09-06): OMD_BRIDGE_MINIMAX_RPM 缺省 120。见 bench-bridge-limiter.ts 头注。
+  const minimaxRpm = Math.max(1, Number(process.env.OMD_BRIDGE_MINIMAX_RPM ?? 120) || 120);
+  const minimaxLimiter = createRateLimiter({ rpm: minimaxRpm });
+  process.stderr.write(`[bench-bridge] minimax 出口限流 rpm=${minimaxRpm}\n`);
   // deepseek 透传凭证: 同引擎 providers.ts 的来源 (DEEPSEEK_API_KEY, bun 自动读 cwd 的 .env)。缺 = deepseek 路由退回 translate, 响亮打一行。
   const deepseekKey = process.env.DEEPSEEK_API_KEY?.trim() || undefined;
   if (!deepseekKey) process.stderr.write('[bench-bridge] ⚠ DEEPSEEK_API_KEY 缺失 → deepseek 路由退回 translate (agent 工具面将蒸发)\n');
@@ -420,6 +425,12 @@ if (import.meta.main) {
         // 工具座路由: minimax / deepseek 坐标走字节级透传 (tools/tool_calls 原生往返); 其余走 translate。
         // deepseek (2026-09-03, smoke8-dsw 根因): 它是 OpenAI 形状端点, 走 translate 时 tools 被剥, conductor 一发文字就结束 (8/8 零派发)。
         const coordForRoute = body.model ? map.get(body.model.trim()) : undefined;
+        // MiniMax 出口限流 (2026-09-06): 令牌桶按 OMD_BRIDGE_MINIMAX_RPM (缺省 120) 放行, 容器并发可以拉到 16 而不撞 2062。
+        // 等待毫秒进 stderr 一行 (只在真等了才打), 是吞吐读数不是错误。
+        if (coordForRoute?.startsWith('minimax-cn:') && passthroughKey) {
+          const waited = await minimaxLimiter.acquire();
+          if (waited > 0) process.stderr.write(`[bench-bridge] minimax 限流等待 ${waited}ms (rpm=${minimaxRpm})\n`);
+        }
         const r = coordForRoute?.startsWith('minimax-cn:') && passthroughKey
           ? await handlePassthrough(body, {
               url: `${(process.env.MINIMAX_BASE_URL?.replace(/\/$/, '') ?? 'https://api.minimaxi.com/v1')}/text/chatcompletion_v2`,
