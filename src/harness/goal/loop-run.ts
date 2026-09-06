@@ -147,7 +147,17 @@ export function withLoopConfig(
           ...(over?.cwd ? { execRoot: over.cwd } : {}),
         }
       : undefined;
-    let childCfg: ExecutorDagConfig = { ...childBase, ...(continuity ? { continuity } : {}) };
+    // R5.1 (2026-09-07, D-R5.1-2): 换根**必须连执行手一起换**。上面那行只换了状态锚, 而
+    // `agentRunner` / `commandRunner` 是装配期按主工作区的 cwd 烤死的 —— 于是三份尝试并发写主树,
+    // 各自 worktree 相对基线零改动 (bench 臂 code80-m3-fanout3 实测 30/30 份 diff 空)。
+    // 钩子缺席 (测试 fake / 宿主自己注入了 runner) ⇒ 展开一个 undefined = 逐字节同旧 (INV-R5.1-3);
+    // **不写成 `agentRunner: base.forRoot?.(…)?.agentRunner`** —— 那样键恒在、值可为 undefined,
+    // 缺席时反而把宿主那只手抹掉了。
+    let childCfg: ExecutorDagConfig = {
+      ...childBase,
+      ...(over?.cwd ? base.forRoot?.(over.cwd) : undefined),
+      ...(continuity ? { continuity } : {}),
+    };
     // decompose 卡 (2026-09-04): 子 run 自己也是一张编排循环 —— 给它装同一副面 (七张卡 + 只读手), 深度 +1;
     // 终审仍只在父 run 打 (childBase 已剥 verifier), 子循环的 conductor 坐 escalation 座 (plan 上已钉)。
     if (isOrchestratingLoopPlan(childPlan)) {

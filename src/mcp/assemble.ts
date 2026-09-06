@@ -557,13 +557,9 @@ export function assembleOmdMcpTools(deps: AssembleOmdMcpDeps = {}): OmdMcpTool[]
   // 注入优先 (测试给 :memory: 的那一个); 缺席才按 env 造 —— 见 AssembleOmdMcpDeps.router 的注。
   const router = deps.router ?? createModelRouterFromEnv(env);
   /**
-   * engine config 基座 —— **每个 run 重算** (INV-MODEL-3 无 boot 冻结)。
+   * **两只真改文件的手, 按给定的根建一对** —— `buildDefaultConfig` 与 `ExecutorDagConfig.forRoot`
+   * 共用这一份 (R5.1, 2026-09-07: 换根重建执行手的参数**只此一处**, 不复制第二套)。
    *
-   * 这一段刻意住在函数里而不是装配期常量: MCP server 是长驻进程 (D-9), 装配期算一次就把座位/池
-   * 冻在 boot 那一刻 —— `omd_set_role` / `omd models auto` 改完 config, 下一次 dag_run 仍用旧座,
-   * 得杀进程重连才生效 (P0 前的真实症状)。router (bandit, 有状态) 与两个 runner 留在外面复用。
-   */
-  /**
    * @param overrideCwd R2 (2026-07-31): 隔离 worktree 档下**必须重建 leaf runner**。
    *   `agentRunner`/`commandRunner` 在装配期就把 cwd 烤进去了(上面那两行), 而 `runGoal` 的
    *   `cwd` 参数只管 spec 存盘目录 —— live 实测到过这个洞: worktree 建起来了、回话说"隔离成功",
@@ -573,7 +569,10 @@ export function assembleOmdMcpTools(deps: AssembleOmdMcpDeps = {}): OmdMcpTool[]
    *   `await loadExtTools(worktree.cwd)` 预加载后传入; 未传 = 该 runner 无 ext (调用方职责) ——
    *   不回落到装配期那批 (worktree 是另一棵树, 它自己的 extensions.json 才算数)。
    */
-  const buildDefaultConfig = (overrideCwd?: string, extToolsForRun?: AnyOmdTool[]): Partial<ExecutorDagConfig> => {
+  const buildRunnersForRoot = (
+    overrideCwd?: string,
+    extToolsForRun?: AnyOmdTool[],
+  ): Pick<ExecutorDagConfig, 'agentRunner' | 'commandRunner'> => {
     const root = overrideCwd ?? cwd;
     // R2 第二层 (2026-07-31, live 抓出来的洞): 光换 cwd **拦不住绝对路径**。第三跑实测有一个
     // agent 的产物落在 `/…/<沙箱>/docs/from-faq.md` —— 隔离树之外。
@@ -625,6 +624,19 @@ export function assembleOmdMcpTools(deps: AssembleOmdMcpDeps = {}): OmdMcpTool[]
       overrideCwd && !deps.commandRunner
         ? createCommandLeafRunner({ allowlist: runAllowlist(root), cwd: root, timeoutMs: 180_000 })
         : commandRunner;
+    return { agentRunner: agentRunnerForRun, commandRunner: commandRunnerForRun };
+  };
+  /**
+   * engine config 基座 —— **每个 run 重算** (INV-MODEL-3 无 boot 冻结)。
+   *
+   * 这一段刻意住在函数里而不是装配期常量: MCP server 是长驻进程 (D-9), 装配期算一次就把座位/池
+   * 冻在 boot 那一刻 —— `omd_set_role` / `omd models auto` 改完 config, 下一次 dag_run 仍用旧座,
+   * 得杀进程重连才生效 (P0 前的真实症状)。router (bandit, 有状态) 与两个 runner 留在外面复用。
+   *
+   * 两个参数的语义见 {@link buildRunnersForRoot} (这里原样转发)。
+   */
+  const buildDefaultConfig = (overrideCwd?: string, extToolsForRun?: AnyOmdTool[]): Partial<ExecutorDagConfig> => {
+    const { agentRunner: agentRunnerForRun, commandRunner: commandRunnerForRun } = buildRunnersForRoot(overrideCwd, extToolsForRun);
     // engine config = 座位三件套 (conductor/leaf/agent, 单一 resolver) + 真改文件 runner 对。
     const models = resolveEngineModels(env);
     // ── 跨模型校验闸 (2026-08-01 点亮) ──────────────────────────────────────────
@@ -805,6 +817,10 @@ export function assembleOmdMcpTools(deps: AssembleOmdMcpDeps = {}): OmdMcpTool[]
       // R2: 隔离档下这两个是**为那棵树重建的**; 无 override 时逐字等于装配期那一对 (零回归)。
       agentRunner: agentRunnerForRun,
       commandRunner: commandRunnerForRun,
+      // R5.1 (2026-09-07, D-R5.1-2): **运行期换根**时重建这两只手的钩子 —— 上面那一对是这次
+      // 装配时那棵树的, 而 R5 扇出会在一次 run 中途把子 run 换到另一棵 worktree 上。
+      // 复用同一个 `buildRunnersForRoot` (jail / advisor / repoChecks 同一份参数), 不写第二套。
+      forRoot: (r: string) => buildRunnersForRoot(r, extToolsForRun),
       ...(researchRunner ? { researchRunner } : {}),
       router,
       // D2 切片 2 (#266): 仓规检查清单 (DagRunnersSeam.repoChecks) — 默认空数组,

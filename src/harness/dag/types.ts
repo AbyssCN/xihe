@@ -160,6 +160,18 @@ export interface DagRunnersSeam {
    */
   commandRunner?: CommandLeafRunner;
   /**
+   * **换根时重建这两只手** (R5.1, 2026-09-07, 契约 `docs/plan/2026-09-06-并行实装扇出-执行契约.md`
+   * D-R5.1-2)。
+   *
+   * 根因: 上面两只 runner 在**装配期**就把 cwd 烤死了, 而换树的调用方 (R5 扇出 / 隔离档) 只换得动
+   * 状态锚 (`continuity.execRoot`)。bench 臂 code80-m3-fanout3 实测的代价: 三份并行尝试全部写进
+   * **主工作区**, 各自 worktree 相对基线零改动 (30/30 份 diff 空)。
+   *
+   * 给了 ⇒ 换根方拿它重建两只手; **缺席 ⇒ 换根只换状态锚, 逐字节同旧** (INV-R5.1-3)。
+   * 实现方 (`src/mcp/assemble.ts` 的 `buildDefaultConfig`) 复用同一个 overrideCwd 分支, 不写第二套参数。
+   */
+  forRoot?: (root: string) => Pick<ExecutorDagConfig, 'agentRunner' | 'commandRunner'>;
+  /**
    * research-kind leaf 的执行器 (真 web 检索 + 有界内环, D-6)。给则 `executor:'research'` 节点经此跑。
    * 省略 → research 节点失败 —— **刻意不降级成 inproc**: 无 web 的 leaf 只会拿模型记忆编引用,
    * 那是假 grounded (与"写文件节点无 agentRunner → 失败"同一条纪律: 拒绝静默假成功)。

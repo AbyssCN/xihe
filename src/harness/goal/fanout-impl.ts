@@ -39,6 +39,11 @@
  * ⚠ 仍在名单外的边界: `.gitignore` 挡掉的文件不进快照 (`git add` 按设计不收), 与 head 档下
  * 那些文件本来就不该被当作产物一致。
  *
+ * ⚠ 建树失败的拒因 (R5.1, 2026-09-07, D-R5.1-3): **截命令回显, 不截 git 的 stderr**。排除名单那 23 条
+ * `:(exclude,glob)…` 自己就 500+ 字, 上一版整段拼完再截 300, 于是 git 说了什么一个字都没进日志
+ * (bench 那次建树失败至今不知道拒因)。带 exclude 的 `git add` 被拒时退回不带 exclude 再试一次:
+ * 派生物进快照只是脏, 建不起树是零扇出。
+ *
  * 证伪方式 (fanout-impl.test.ts): 快照改回 `git stash create` ⇒「未跟踪的新文件也进快照」当场红;
  * 去掉 `GIT_INDEX_FILE` 让 `git add` 打进主索引 ⇒「主工作区的索引一个字节不动」当场红;
  * 改成从 `HEAD` 建树 ⇒「树里看得见未提交改动」当场红;
@@ -112,6 +117,16 @@ export const fanoutWorktreeDir = (root: string, stamp: string, index: number): s
   join(root, '.omd', 'fanout', `${stamp}-${index}`);
 
 /**
+ * 命令回显 —— 长 pathspec 折成一句摘要 (D-R5.1-3)。**拒因里该占字数的是 git 的话, 不是我们的参数**:
+ * 排除名单有 23 条 `:(exclude,glob)…`, 原样贴出来能吃掉 500+ 字, 而读的人要的是 git 为什么拒。
+ */
+function echoArgs(args: readonly string[]): string {
+  const kept = args.filter((a) => !a.startsWith(':('));
+  const excluded = args.length - kept.length;
+  return excluded > 0 ? `${kept.join(' ')} (+${excluded} 条 exclude pathspec)` : kept.join(' ');
+}
+
+/**
  * 排除名单 → git pathspec。`:(exclude,glob)` 的双星跨目录匹配, 所以每个名字来两条形态:
  * 一条钉顶层的那份, 一条钉任意深度的那份 (只写顶层那条会漏掉 `apps/web` 里的同名目录)。
  * `.pyc` / `.pyo` / `.egg-info` 单列 —— 它们是文件后缀, 不是目录名。
@@ -139,9 +154,16 @@ function snapshotBase(root: string, git: (args: string[], env?: Record<string, s
   try {
     const env = { GIT_INDEX_FILE: join(dir, 'index') };
     git(['read-tree', 'HEAD'], env);
-    // `add .` 而不是 `add -A`: 两者在带路径 pathspec 时等价 (git ≥ 2.0 都收新增/修改/删除),
-    // 而本仓的 git 守卫按字面拦 `add -A` —— 用等价的写法省掉一条永远要解释的例外。
-    git(['add', '.', ...snapshotExcludes()], env);
+    // D-R5.1-3 (2026-09-07): `add -A -- . <excludes>` —— `--` 把 pathspec 与选项分开, 免得
+    // `:(exclude,…)` 被某些 git 当成选项。**排除名单被拒时退回不带 exclude 的形态再试一次**:
+    // 派生物进快照只是脏 (每棵树多带一份垃圾), 建不起树是**零扇出** —— 两害相权取其轻。
+    try {
+      git(['add', '-A', '--', '.', ...snapshotExcludes()], env);
+    } catch (err) {
+      // fail-open 吞异常不吞证据: git 的拒因原文进日志 (上一版正是在这里丢的, 见 G-3)。
+      logger.warn({ root, err: String(err).slice(0, 800) }, '[fanout] 带 exclude 的 git add 被拒 → 退回不带 exclude 再试 (派生物会进快照)');
+      git(['add', '-A', '--', '.'], env);
+    }
     const tree = git(['write-tree'], env);
     if (tree === git(['rev-parse', 'HEAD^{tree}'])) return head;
     return git(['commit-tree', tree, '-p', head, '-m', 'omd fanout snapshot (临时索引, 主索引未动)'], env);
@@ -165,7 +187,10 @@ export function planFanoutWorktrees(
   const run = opts.run ?? defaultRun;
   const git = (args: string[], env?: Record<string, string>): string => {
     const r = run(['git', ...args], { cwd: root, ...(env ? { env } : {}) });
-    if (r.exitCode !== 0) throw new Error(`git ${args.join(' ')} 失败 (exit ${r.exitCode}): ${(r.stderr || r.stdout).trim()}`);
+    // D-R5.1-3 (2026-09-07): **截的是命令回显, 不是 stderr**。上一版把两段接起来后由调用方统一截
+    // 300 字, 而 `:(exclude,glob)…` 那串 pathspec 自己就超过 300 字 —— git 的拒因一个字都到不了
+    // 日志里 (bench 那次建树失败正是这样, 至今不知道 git 说了什么)。stderr 留 600 字。
+    if (r.exitCode !== 0) throw new Error(`git ${echoArgs(args)} 失败 (exit ${r.exitCode}): ${(r.stderr || r.stdout).trim().slice(0, 600)}`);
     return r.stdout.trim();
   };
   const base = snapshotBase(root, git);
@@ -188,7 +213,8 @@ export function planFanoutWorktrees(
     }
   } catch (err) {
     // 半途失败: 已建的先拆干净再把原文抛出去 —— 留一堆半成品 worktree 比失败本身更难查。
-    logger.warn({ root, built: worktrees.length, err: String(err).slice(0, 300) }, '[fanout] 建隔离树中途失败 → 拆掉已建的, 退回单份路径');
+    // D-R5.1-3: 800 字 —— 拒因里已经把 pathspec 折成了摘要 (echoArgs), 这个额度留给 git 的原话。
+    logger.warn({ root, built: worktrees.length, err: String(err).slice(0, 800) }, '[fanout] 建隔离树中途失败 → 拆掉已建的, 退回单份路径');
     disposeFanoutWorktrees(root, worktrees, { run });
     throw err;
   }

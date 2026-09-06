@@ -50,9 +50,10 @@ describe('seam 目录 (gen-seam-catalog)', () => {
     // +1 来自 S2 片 3 (2026-08-25): spinRung2 (DagRunnersSeam) 节点级空转档 2 阶梯配置
     // +1 来自 t-initial-pump (2026-09-02): warmGraceMs (DagSchedulingSeam) 暖发宽限窗口上界
     // 注: 新增 `RepoCheck` 类型不在 Dag*Seam 接口字段数内, 故 seam 字段数只 +1。
+    // +1 来自 R5.1 (2026-09-07): forRoot (DagRunnersSeam) 换根重建两只 leaf runner 的钩子 → 50。
     const seams = extractSeams(readFileSync(join(ROOT, 'src/harness/dag/types.ts'), 'utf8'));
     expect(seams).toHaveLength(8);
-    expect(seams.reduce((n, s) => n + s.fields.length, 0)).toBe(49);
+    expect(seams.reduce((n, s) => n + s.fields.length, 0)).toBe(50);
   });
 
   // 2026-09-02 实测踩到的病: `src/harness/plan/map-expand.ts` 的注释里写了某个 Dag*Seam 字段名,

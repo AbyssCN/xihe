@@ -37,7 +37,7 @@ import { z } from 'zod';
 import { withProtectedPaths, type AnyOmdTool } from '../agent-tools';
 import { join } from 'node:path';
 import { hashArtifact } from '../continuity/checkpoint-manager';
-import { isRunnableAcceptanceCommand, probeCriterionDirection } from './acceptance-gate';
+import { acceptanceCommandBlockReason, probeCriterionDirection } from './acceptance-gate';
 import { allowlistForRoot, createCommandLeafRunner } from '../command-leaf';
 import { createFanoutComparator } from '../verifier';
 import {
@@ -419,13 +419,22 @@ interface FanoutState {
  *  ② 有执行型验收 (`ctx.acceptance`) —— rubric / 探索型没有可跑的判据, 择优无从谈起;
  *  ③ 那条判据过得了命令闸 (跑不起来的判据在 N 棵树里同样跑不起来, 只会把 N 份全判成红);
  *  ④ 本 run 还没扇过 (`ledger.fanout` 缺席) —— D-14 回灌的第二跑沿用同一本账, 据此不再扇。
+ *
+ * ③ 走的是 **root-aware** 那一版 (D-R5.1-1, 2026-09-07)。此前用无根版 `isRunnableAcceptanceCommand`,
+ * 它只看 `DEFAULT_COMMAND_ALLOWLIST` —— 表里没有 pytest/python, 于是 bench 臂 code80-m3-fanout3
+ * 80 题只触发 10 题, 另 75 次全是「python 仓的 `pytest …` 被无根白名单拒」。
+ * **不传 `declaredArtifacts`**: 路径自证那道不在这里跑 —— 判据引用的文件由树里的尝试写出,
+ * D-3 ① 在树里跑判据时它才该在, 在这里判"文件不存在"会把所有先写实装的题拒光。
  */
 function initFanoutState(deps: ConductorRuntimeDeps): FanoutState | undefined {
   const n = parseFanoutN(process.env.OMD_WORK_FANOUT);
   if (n === undefined) return undefined;
   const acc = deps.ctx.acceptance;
-  if (!acc || !isRunnableAcceptanceCommand(acc.command)) {
-    logger.info({ n, hasAcceptance: Boolean(acc) }, '[fanout] 开关开着但没有可跑的执行型判据 → 不扇出 (择优没有机械依据)');
+  const blocked = acc ? acceptanceCommandBlockReason(acc.command, { root: deps.ctx.cwd }) : '(没有执行型验收)';
+  if (blocked) {
+    // 拒因原文进日志 —— 上一版只记 `hasAcceptance:true`, 于是 75 次不触发在盘上长得一模一样,
+    // 「判据是 pytest 被白名单拒」这件事一个字都读不出来 (§静默坑 2)。
+    logger.info({ n, hasAcceptance: Boolean(acc), root: deps.ctx.cwd, blocked }, '[fanout] 开关开着但没有可跑的执行型判据 → 不扇出 (择优没有机械依据)');
     return undefined;
   }
   if (deps.ledger?.fanout) {
@@ -471,7 +480,9 @@ async function runWorkFanout(args: {
   try {
     ({ worktrees, base } = planFanoutWorktrees(root, n));
   } catch (err) {
-    const why = `建隔离树失败, 退回单份派发: ${String(err).slice(0, 240)}`;
+    // D-R5.1-3 (2026-09-07): 240 → 800。拒因里的 pathspec 已折成摘要 (fanout-impl 的 echoArgs),
+    // 这个额度留给 git 的原话 —— 上一版这里截 240, 账本上的 why 到 git 说话之前就没了。
+    const why = `建隔离树失败, 退回单份派发: ${String(err).slice(0, 800)}`;
     logger.warn({ root, n, why }, '[fanout] 建隔离树失败 (fail-open: 活照跑, 只是不扇出)');
     return bail(why);
   }

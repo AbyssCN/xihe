@@ -37,9 +37,27 @@ function repo(): string {
   git(['config', 'user.name', 't'], root);
   mkdirSync(join(root, 'src'), { recursive: true });
   writeFileSync(join(root, 'src/real.ts'), 'export const saveReasonFull = -1;\n');
+  // R5.1 (2026-09-07): 触发闸改 root-aware 之后, `bun test` 这条判据要仓里**有 js 证据**才放行
+  // (语言一致闸认 package.json / tsconfig.json / bun.lock 任一)。夹具补上 marker —— 否则本文件
+  // 所有「扇出触发」的用例都会因为"这仓没有 js 证据"而不触发, 量的就不是接线了。
+  writeFileSync(join(root, 'package.json'), '{"name":"fanout-fixture"}\n');
   git(['add', '-A'], root);
   git(['commit', '-qm', 'init'], root);
   return root;
+}
+
+/**
+ * PATH 上放一个假 bin —— root-aware 闸的第三道 (`missingBinaryBlockReason`) 问的是
+ * 「这台机器上装没装这个命令」, 而 CI/本机不一定有 pytest。假 bin 只为过那一道, 不会被执行
+ * (判据 runner 在本文件里是注入的)。
+ */
+const pathBackup: string[] = [];
+function withFakeBin(root: string, name: string): void {
+  const bin = join(root, '.fakebin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, name), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  pathBackup.push(process.env.PATH ?? '');
+  process.env.PATH = `${bin}:${process.env.PATH ?? ''}`;
 }
 
 /** 扇出树的号 = 目录名末段 (`<stamp>-<i>`); 主工作区没有这个形状 → -1。 */
@@ -71,12 +89,14 @@ function harness(
     green?: number[];
     compare?: (green: FanoutAttempt[]) => Promise<{ index: number; reason: string }>;
     applyOk?: (index: number) => boolean;
+    /** 冻结判据原文 (缺省 = 本仓夹具的 js 判据); INV-R5.1-1 用它换成 pytest 那条。 */
+    acceptance?: string;
   } = {},
 ): Harness {
   const ctx: ConductorCtx = {
     cwd: root,
     writeRoot: root,
-    acceptance: { command: 'bun test src/real.test.ts', expect_exit: 0 },
+    acceptance: { command: opts.acceptance ?? 'bun test src/real.test.ts', expect_exit: 0 },
     allowlist: ['bun', 'git'],
     maxFanout: 4,
     seats: { worker: 'w:1', escalation: 'e:1', verify: '' },
@@ -141,6 +161,8 @@ const fanoutDirsLeft = (root: string): boolean => existsSync(join(root, '.omd', 
 
 afterEach(() => {
   delete process.env.OMD_WORK_FANOUT;
+  // PATH 改过就还回去 (第一次备份的那份 = 本文件动手之前的原值)。
+  if (pathBackup.length) process.env.PATH = pathBackup.splice(0)[0]!;
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 
@@ -267,5 +289,37 @@ describe('INV-6: 第二次 work (修复轮) 不再扇出', () => {
     expect(h.overs[2]).toBeUndefined();
     expect(h.ledger.fanout).toMatchObject({ n: 2, ran: 2 });
     expect(h.ledger.dispatches).toHaveLength(2);
+  });
+});
+
+// ── INV-R5.1-1 触发判定走 root-aware 闸 (2026-09-07) ─────────────────────────
+//
+// 根因 (G-1, bench 臂 code80-m3-fanout3 实测 80 题只触发 10 题): `initFanoutState` 调的是
+// **无根版** `isRunnableAcceptanceCommand`, 它只看 `DEFAULT_COMMAND_ALLOWLIST` —— 表里没有
+// pytest, 于是 75 次「开关开着但没有可跑的执行型判据」全落在 python 仓的 `pytest …` 上。
+
+describe('INV-R5.1-1: 触发判定用 root-aware 闸 (allowlistForRoot), 不是无根白名单', () => {
+  test('★ pytest 判据 + python 仓 (pyproject.toml) ⇒ 触发扇出 (证伪: 换回 isRunnableAcceptanceCommand ⇒ 本条红)', async () => {
+    process.env.OMD_WORK_FANOUT = '2';
+    const root = fresh();
+    writeFileSync(join(root, 'pyproject.toml'), '[project]\nname = "x"\n');
+    withFakeBin(root, 'pytest');
+    // 判据点名的文件此刻**不存在** —— D-R5.1-1 不传 declaredArtifacts, 路径自证那道不在这里跑
+    // (那个文件由树里的尝试写出, D-3 ① 在树里跑判据时它才该在)。传了这条就会被拒。
+    expect(existsSync(join(root, 'tests/test_x.py'))).toBe(false);
+    const h = harness(root, { green: [1], acceptance: 'pytest -q tests/test_x.py' });
+    await h.work.execute('t', PARAMS);
+    expect(h.overs).toHaveLength(2);
+    expect(h.ledger.fanout).toMatchObject({ n: 2, ran: 2, chosen: 1, chosenBy: 'only-green' });
+  });
+
+  test('★ 同一条 pytest 判据, 仓里没有 python marker ⇒ 仍不触发 (root-aware ≠ 一律放行)', async () => {
+    process.env.OMD_WORK_FANOUT = '2';
+    const root = fresh(); // 只有 package.json (js marker), 没有 pyproject.toml
+    withFakeBin(root, 'pytest');
+    const h = harness(root, { acceptance: 'pytest -q tests/test_x.py' });
+    await h.work.execute('t', PARAMS);
+    expect(h.overs).toEqual([undefined]);
+    expect(h.ledger.fanout).toBeUndefined();
   });
 });

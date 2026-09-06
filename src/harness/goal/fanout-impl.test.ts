@@ -26,7 +26,9 @@ import {
   planFanoutWorktrees,
   scoreAttempts,
   type FanoutAttempt,
+  type SpawnLike,
 } from './fanout-impl';
+import { logger } from '../logger';
 
 // ── 真仓夹具 (mkdtemp + git init, 不 mock git) ───────────────────────────────
 
@@ -303,6 +305,60 @@ describe('applyWinner —— 赢家 diff 打回主工作区', () => {
       expect(r.applied).toBe(false);
       expect(r.why ?? '').toContain('空');
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── D-R5.1-3 建树失败的拒因 (2026-09-07) ────────────────────────────────────
+//
+// 根因 (G-3, bench 臂 code80-m3-fanout3 那 1 次建树失败): 拒因按 300 字截, 而 `:(exclude,glob)…`
+// 的 pathspec 串本身就超过 300 字 —— git 的 stderr 一个字都没进日志, 于是"为什么建不起来"
+// 在盘上不可知。派生物进快照只是脏, 建不起树是**零扇出**。
+
+describe('planFanoutWorktrees —— 带 exclude 的 git add 被拒时退回不带 exclude 再试 (INV-R5.1-4)', () => {
+  /** 假 git: 只在 `add` 带 exclude pathspec 时失败, 其余全成。 */
+  function fakeGit(): { run: SpawnLike; calls: string[][] } {
+    const calls: string[][] = [];
+    const ok = (stdout: string): { exitCode: number; stdout: string; stderr: string } => ({ exitCode: 0, stdout, stderr: '' });
+    const run: SpawnLike = (args) => {
+      calls.push([...args]);
+      const a = args.slice(1); // 去掉首词 'git'
+      if (a[0] === 'rev-parse') return ok(a[1] === 'HEAD' ? 'HEADSHA\n' : 'HEADTREESHA\n');
+      if (a[0] === 'add') {
+        return a.some((x) => x.startsWith(':(exclude'))
+          ? { exitCode: 128, stdout: '', stderr: 'fatal: pathspec magic not supported by this implementation: exclude\n' }
+          : ok('');
+      }
+      if (a[0] === 'write-tree') return ok('NEWTREESHA\n');
+      if (a[0] === 'commit-tree') return ok('BASESHA\n');
+      return ok('');
+    };
+    return { run, calls };
+  }
+
+  test('★ 带 exclude 的 add 失败 ⇒ 不带 exclude 再试一次, 树照建成, 并 warn 一条带 git 原文 (证伪: 去掉退回那一跳 ⇒ 本条抛错红)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'omd-fanout-fakegit-'));
+    const origWarn = logger.warn;
+    const warns: Array<{ obj: unknown; msg?: string }> = [];
+    logger.warn = ((obj: unknown, msg?: string) => {
+      warns.push({ obj, msg });
+    }) as unknown as typeof logger.warn;
+    try {
+      const { run, calls } = fakeGit();
+      const { worktrees, base } = planFanoutWorktrees(root, 2, { run, stamp: 'st' });
+      expect(worktrees).toHaveLength(2);
+      expect(base).toBe('BASESHA');
+      const adds = calls.filter((c) => c[1] === 'add');
+      expect(adds).toHaveLength(2);
+      expect(adds[0]!.some((x) => x.startsWith(':(exclude'))).toBe(true); // 先试带 exclude 的
+      expect(adds[1]!.some((x) => x.startsWith(':(exclude'))).toBe(false); // 退回不带 exclude
+      // fail-open 吞异常不吞证据: git 的拒因原文要出得来 (这正是 G-3 那次读不到的东西)。
+      const w = warns.find((x) => (x.msg ?? '').includes('exclude'));
+      expect(w).toBeDefined();
+      expect(JSON.stringify(w!.obj)).toContain('pathspec magic not supported');
+    } finally {
+      logger.warn = origWarn;
       rmSync(root, { recursive: true, force: true });
     }
   });
