@@ -29,8 +29,16 @@ const defaultRun: SpawnLike = (argv, cwd) => {
   return { exitCode: r.exitCode, stdout: new TextDecoder().decode(r.stdout), stderr: new TextDecoder().decode(r.stderr) };
 };
 
+/**
+ * 不算产物的路径: 引擎留痕 (`.omd/`) 与**派生缓存** (`__pycache__` / `*.pyc` / `.pytest_cache` / `.mypy_cache` /
+ * `.ruff_cache` / `node_modules` / `*.egg-info`)。dd-cons 臂实测: 不排缓存, 每次跑测试都把 `.pyc` 记成 orphan,
+ * 写集对账被噪声淹没。这是派生物的通用名单, 与 env-facts 的扫描跳过表同一性格。
+ */
+const DERIVED_DIRS = new Set(['.omd', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', 'node_modules', '.tox', 'dist', 'build']);
 function isEngineOwned(rel: string): boolean {
-  return rel.split(/[\\/]/)[0] === '.omd';
+  const parts = rel.split(/[\\/]/);
+  if (parts.some((p) => DERIVED_DIRS.has(p) || p.endsWith('.egg-info'))) return true;
+  return rel.endsWith('.pyc') || rel.endsWith('.pyo');
 }
 
 /** 拍一次盘上状态。非 git 仓 / git 失败 ⇒ 空 map + why (fail-open)。 */

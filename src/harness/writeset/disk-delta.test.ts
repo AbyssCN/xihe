@@ -49,6 +49,18 @@ describe('disk-delta', () => {
     expect(diskDelta(before.files, after.files)).toEqual([]);
     rmSync(d, { recursive: true, force: true });
   });
+  test('派生缓存 (__pycache__/*.pyc, .pytest_cache) 不收 —— dd-cons 实测跑一次 pytest 就把 .pyc 记成 orphan', () => {
+    const d = repo();
+    const before = snapshotDisk(d);
+    mkdirSync(join(d, 'src', '__pycache__'));
+    writeFileSync(join(d, 'src', '__pycache__', 'a.cpython-312.pyc'), 'bin');
+    mkdirSync(join(d, '.pytest_cache'));
+    writeFileSync(join(d, '.pytest_cache', 'v'), 'x');
+    writeFileSync(join(d, 'src', 'c.py'), 'z = 1\n');
+    const after = snapshotDisk(d);
+    expect(diskDelta(before.files, after.files)).toEqual(['src/c.py']);
+    rmSync(d, { recursive: true, force: true });
+  });
   test('非 git 目录 ⇒ 空 map + why (fail-open 留证据)', () => {
     const d = mkdtempSync(join(tmpdir(), 'omd-disk-delta-nogit-'));
     const s = snapshotDisk(d);
