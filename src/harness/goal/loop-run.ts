@@ -134,9 +134,18 @@ export function withLoopConfig(
   const ctx = conductorCtxOf(host, runnable);
   const { verifier: _v, maxEscalations: _m, leafFace: _f, freezeCriterion: _c, frozenNodes: _n, deterministicReplan: _d, ...childBase } = base;
   void _v; void _m; void _f; void _c; void _n; void _d;
-  const runChild = (childPlan: ConductorPlan, seq: number): Promise<ExecutorDagResult> => {
+  const runChild = (childPlan: ConductorPlan, seq: number, over?: { cwd: string; runIdSuffix?: string }): Promise<ExecutorDagResult> => {
+    // R5 扇出 (2026-09-06): `over.cwd` = 这一份尝试自己的 worktree。**必须落在 `execRoot`** ——
+    // 那是「leaf 真写文件的那棵树」(dag/types.ts 的执行锚); 写进 `repoRoot` 会把 checkpoint 一起搬走,
+    // 而 checkpoint 该留在主仓 (与隔离档 `goal.ts:1273` 的双锚分离同一条判据)。
+    // 子 runId 也要带上份号, 否则 N 份尝试的 checkpoint 互相覆盖。缺席 ⇒ 逐字节同旧。
     const continuity = base.continuity
-      ? { ...base.continuity, runId: `${base.continuity.runId}:d${seq}`, resume: false }
+      ? {
+          ...base.continuity,
+          runId: `${base.continuity.runId}:d${seq}${over?.runIdSuffix ? `-${over.runIdSuffix}` : ''}`,
+          resume: false,
+          ...(over?.cwd ? { execRoot: over.cwd } : {}),
+        }
       : undefined;
     let childCfg: ExecutorDagConfig = { ...childBase, ...(continuity ? { continuity } : {}) };
     // decompose 卡 (2026-09-04): 子 run 自己也是一张编排循环 —— 给它装同一副面 (七张卡 + 只读手), 深度 +1;

@@ -160,6 +160,39 @@ export interface CriterionFreeze {
   tampered?: string[];
 }
 
+/**
+ * R5 并行实装扇出的读数 (2026-09-06 D-5, 见 `./fanout-impl`)。
+ *
+ * 三态别压平 (§静默坑 1): **整格缺席 = 没扇出** (`OMD_WORK_FANOUT` 不在 2..4 / 不是执行型验收 /
+ * 判据跑不了 / 这已经是修复轮); `ran: 0` = 扇了但一份子 run 都没跑成; `green: 0` = 跑了没有一份过判据
+ * (那时 `noGreen` 为真, 选的是失败用例最少的一份, 交给既有修复轮接手)。
+ *
+ * · `n`              请求的份数 (2..4);
+ * · `ran`            子 run 真跑回来的份数 (抛错的那几份不算);
+ * · `green`          判据退出码等于期望值的份数;
+ * · `chosen`         **最终合回主工作区**的那一份的号 —— 不是择优时点的号: 择优点的那份合不回去时
+ *                    会退次优, 这一位记的是真进了主工作区的那个 (`applyConflicts > 0` 时两者不同);
+ * · `chosenBy`       谁选的 (机械档 only-green / least-failures vs 判官 verifier);
+ * · `noGreen`        零份绿;
+ * · `applyConflicts` `git apply` 打不上去的次数;
+ * · `wallMs`         整段扇出的墙钟 (并行, 所以约等于最慢一份 + 判据 + 合回);
+ * · `why`            扇出没走完的原文 (建树失败 / 全部合不回 ⇒ 已退回单份派发)。缺席 = 走完了。
+ *
+ * 塌了怎么记 (契约预注册): `green` 多为 0 ⇒ 判据本身过不去, 扇出无用武之地; `green` 恒等于 `n` ⇒
+ * 判据分不开优劣, 择优退化成随机 —— 那时收益应 ≈ 0。
+ */
+export interface FanoutLedger {
+  n: number;
+  ran: number;
+  green: number;
+  chosen: number;
+  chosenBy: 'only-green' | 'verifier' | 'least-failures';
+  noGreen: boolean;
+  applyConflicts: number;
+  wallMs: number;
+  why?: string;
+}
+
 /** 运行期计数器 (可变)。字段语义与 {@link LoopLedger.cards} 逐字相同。 */
 export interface ConductorCardLedger {
   calls: number;
@@ -181,6 +214,11 @@ export interface ConductorCardLedger {
   criterionAuthor?: CriterionAuthorResult;
   /** W1 勘察包读数 (装配期写一次; 语义见 {@link LoopLedger.surveyPack})。 */
   surveyPack?: SurveyPackFacts;
+  /**
+   * R5 扇出读数 (首次实装派发那一发写一次; 语义见 {@link FanoutLedger})。
+   * **在场即「本 run 已经扇过」** —— D-14 回灌的第二跑沿用同一本账, 据此不再扇 (INV-6)。
+   */
+  fanout?: FanoutLedger;
 }
 
 /**
@@ -357,8 +395,15 @@ export interface LoopLedger {
    * 契约预注册要收的正是「`accepted` 率」与「accepted 题 vs 未 accepted 题的 reward」这一对。
    */
   criterionAuthor?: CriterionAuthorResult;
+  /**
+   * R5 并行实装扇出的读数 (2026-09-06 D-5, 见 {@link FanoutLedger})。
+   *
+   * 挂这里的理由同上面几格: 只有 `r.loop` 整份 JSON 出得了 bench 容器。
+   * 运行期那份写在 `ConductorCardLedger.fanout` 上, `run-goal.ts` 组装 loop 时提上来。
+   */
+  fanout?: FanoutLedger;
 
-  cards: Omit<ConductorCardLedger, 'dispatches' | 'residentPromptChars' | 'criterionFreeze' | 'criterionDirection' | 'criterionAuthor'>;
+  cards: Omit<ConductorCardLedger, 'dispatches' | 'residentPromptChars' | 'criterionFreeze' | 'criterionDirection' | 'criterionAuthor' | 'fanout'>;
   dispatches: LoopDispatch[];
   /** 1-A 冻结台账 (收尾时 `tampered` 已核)。缺席 = 判据不引用未存在文件。 */
   criterionFreeze?: CriterionFreeze;

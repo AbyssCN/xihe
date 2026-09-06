@@ -3059,6 +3059,8 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
         ...(loopLedger.surveyPack ? { surveyPack: loopLedger.surveyPack } : {}),
         // R4 异族先写判据读数 (2026-09-06): 同一条理由挂在 loop 上。缺席 = 开关没开 (三态见 LoopLedger.criterionAuthor)。
         ...(loopLedger.criterionAuthor ? { criterionAuthor: loopLedger.criterionAuthor } : {}),
+        // R5 并行实装扇出读数 (2026-09-06): 同一条理由挂在 loop 上。缺席 = 没扇出 (三态见 LoopLedger.fanout)。
+        ...(loopLedger.fanout ? { fanout: loopLedger.fanout } : {}),
         // W3 runner 就绪预检 (2026-09-06): 同一条理由挂在 loop 上。恒写 —— 预检在这条路上一定跑过,
         // 「不适用」由 `runner: null` 表达, 不用缺席表达 (§静默坑 1)。
         runnerReady,

@@ -37,7 +37,20 @@ import { z } from 'zod';
 import { withProtectedPaths, type AnyOmdTool } from '../agent-tools';
 import { join } from 'node:path';
 import { hashArtifact } from '../continuity/checkpoint-manager';
-import { probeCriterionDirection } from './acceptance-gate';
+import { isRunnableAcceptanceCommand, probeCriterionDirection } from './acceptance-gate';
+import { allowlistForRoot, createCommandLeafRunner } from '../command-leaf';
+import { createFanoutComparator } from '../verifier';
+import {
+  applyWinner,
+  captureAttemptDiff,
+  chooseAttempt,
+  countFailingCases,
+  disposeFanoutWorktrees,
+  parseFanoutN,
+  planFanoutWorktrees,
+  scoreAttempts,
+  type FanoutAttempt,
+} from './fanout-impl';
 import type { ConductorPlan } from '../conductor-plan';
 import type { ExecutorDagResult, LeafResult } from '../dag/types';
 import type { LeafFace } from '../leaf-runners';
@@ -49,7 +62,7 @@ import { checkCoords } from './coord-check';
 import { HANDOFF_HEADER, type ReadLedger } from '../read-ledger';
 import { repoRelativePath } from '../repo-path';
 import { diskDelta, snapshotDisk } from '../writeset/disk-delta';
-import { briefHasRepro, computeLoopDispatchFacts, type CriterionFreeze, type ConductorCardLedger, type ConductorCardName } from './loop-ledger';
+import { briefHasRepro, computeLoopDispatchFacts, type CriterionFreeze, type ConductorCardLedger, type ConductorCardName, type FanoutLedger } from './loop-ledger';
 
 /** plan 名 —— run-goal 的 `_runDag` 注入口与测试靠它认路径 (与 `goal-execute` / `goal-execute-flat` 同一约定)。 */
 // plan 形状真源挪到 conductor/loop-plan.ts (2026-09-04: decompose 卡也要编它, 留在这里是循环 import); 这里原名再导出。
@@ -295,8 +308,13 @@ export interface ConductorRuntimeDeps {
   /**
    * 跑一张编译产物。run-goal 给的是 `(config._runDag ?? runExecutorDagWithPlan)(plan, childCfg)` —— 唯一执行
    * 入口 (D-5); 第二个参数是派发序号 (从 1 起), 调用方据它派生子 runId / 前缀。
+   *
+   * 第三个参数 = **换一棵树跑** (R5 扇出, 2026-09-06)。缺席 ⇒ 老调用零改动 (派在主工作区)。
+   * ⚠ 契约写的是 `{ cwd, artifactRoot }` 两位, 实装合成一位: 引擎里「leaf 真写文件的那棵树」只有
+   * `continuity.execRoot` 一格 (dag/types.ts 的执行锚), 分两位必然有一位是死的。
+   * `runIdSuffix` 让 N 份尝试的子 runId 互不相撞 (否则它们的 checkpoint 会互相覆盖)。
    */
-  runChild: (plan: ConductorPlan, seq: number) => Promise<ExecutorDagResult>;
+  runChild: (plan: ConductorPlan, seq: number, over?: { cwd: string; runIdSuffix?: string }) => Promise<ExecutorDagResult>;
   /** R-1 账本 (可变计数器, run-goal 造一个, 回灌第二跑沿用同一个)。缺席 = 不记 (测试 / 非 run-goal 调用方)。 */
   ledger?: ConductorCardLedger;
   /**
@@ -322,6 +340,18 @@ export interface ConductorRuntimeDeps {
    * 缺席 / 空串 = 不追加 (子 goal 逐字同旧)。
    */
   surveyPack?: string;
+  /**
+   * R5 扇出 (2026-09-06 D-3 ①): 在**某一棵**扇出树里跑冻结判据, 拿退出码与判词原文。
+   * 缺席 = 用 command-leaf 真跑 (per-root 白名单, 与验收探针同一条路)。测试注入这一位。
+   */
+  fanoutRunCriterion?: (input: { command: string; cwd: string }) => Promise<{ exitCode: number | null; text: string }>;
+  /**
+   * R5 扇出 (D-3 ③): 比较卷。缺席 ⇒ 有 verifier 座就现造一个 (`createFanoutComparator`),
+   * 座位也缺席 ⇒ **不调判官**, 择优退到机械档 `least-failures` (不假装调过)。
+   */
+  compareFanout?: (green: FanoutAttempt[]) => Promise<{ index: number; reason: string }>;
+  /** R5 扇出 (D-4): 合回主工作区的注入面 (测试造冲突)。缺席 = 真 `git apply`。 */
+  fanoutApply?: typeof applyWinner;
 }
 
 function toTypebox(schema: z.ZodType): ReturnType<typeof Type.Unsafe> {
@@ -375,16 +405,199 @@ export function renderCriterionFreezeTruth(freeze: CriterionFreeze, root: string
   return `派发 #${freeze.frozenAtDispatch} 单独产出并冻结: ${parts.join(' · ')}${authorModel ? ` · 作者=异族座 ${authorModel}` : ''}`;
 }
 
+// ── R5 并行实装扇出 (2026-09-06, 契约 docs/plan/2026-09-06-并行实装扇出-执行契约.md) ──────
+
+/** 扇出的运行期状态 (每副工具面一份)。`used` 一旦为真就再也不扇 —— 修复轮不该再 ×N (INV-6)。 */
+interface FanoutState {
+  n: number;
+  used: boolean;
+}
+
+/**
+ * D-1 触发判定。**四条全真才扇**, 任一不真 ⇒ 返回 `undefined`, 派发路径逐字节同旧 (INV-1):
+ *  ① `OMD_WORK_FANOUT` 在 2..4;
+ *  ② 有执行型验收 (`ctx.acceptance`) —— rubric / 探索型没有可跑的判据, 择优无从谈起;
+ *  ③ 那条判据过得了命令闸 (跑不起来的判据在 N 棵树里同样跑不起来, 只会把 N 份全判成红);
+ *  ④ 本 run 还没扇过 (`ledger.fanout` 缺席) —— D-14 回灌的第二跑沿用同一本账, 据此不再扇。
+ */
+function initFanoutState(deps: ConductorRuntimeDeps): FanoutState | undefined {
+  const n = parseFanoutN(process.env.OMD_WORK_FANOUT);
+  if (n === undefined) return undefined;
+  const acc = deps.ctx.acceptance;
+  if (!acc || !isRunnableAcceptanceCommand(acc.command)) {
+    logger.info({ n, hasAcceptance: Boolean(acc) }, '[fanout] 开关开着但没有可跑的执行型判据 → 不扇出 (择优没有机械依据)');
+    return undefined;
+  }
+  if (deps.ledger?.fanout) {
+    logger.info({ n }, '[fanout] 本 run 已经扇过一次 → 修复轮不再扇 (INV-6)');
+    return undefined;
+  }
+  return { n, used: false };
+}
+
+/** 判据默认 runner: 与验收探针同一条路 (per-root 白名单 + 验收档超时), 只是根换成那棵扇出树。 */
+async function defaultFanoutCriterion({ command, cwd }: { command: string; cwd: string }): Promise<{ exitCode: number | null; text: string }> {
+  const r = await createCommandLeafRunner({ allowlist: allowlistForRoot(cwd), cwd, timeoutMs: 180_000 })({ command });
+  return { exitCode: r.exitCode, text: r.text };
+}
+
+/**
+ * 一次 `work` 派发的扇出全程 (D-2 → D-3 → D-4)。
+ *
+ * 返回 `exec` = **真进了主工作区**的那一份的子 run 结果; `undefined` = 这次扇出没能交付
+ * (建树失败 / 一份都没跑成 / 全部合不回) ⇒ 调用方退回单份派发。
+ * **绝不返回一份没被应用的 exec**: 那等于拿一棵已经删掉的树里的产出去报"活干完了"。
+ *
+ * 拆树在 `finally` 里 —— 中途任何一步抛都不许留下 N 棵半成品树。
+ */
+async function runWorkFanout(args: {
+  deps: ConductorRuntimeDeps;
+  n: number;
+  seq: number;
+  task: string;
+  /** 在某棵树里跑一次子 run (已经带上冻结保护那一层)。 */
+  runOne: (over: { cwd: string; runIdSuffix?: string }) => Promise<ExecutorDagResult>;
+}): Promise<{ exec?: ExecutorDagResult; facts: FanoutLedger }> {
+  const { deps, n, seq, task, runOne } = args;
+  const t0 = Date.now();
+  const root = deps.ctx.cwd;
+  const expectExit = deps.ctx.acceptance?.expect_exit ?? 0;
+  const command = deps.ctx.acceptance!.command;
+  const bail = (why: string): { facts: FanoutLedger } => ({
+    facts: { n, ran: 0, green: 0, chosen: -1, chosenBy: 'least-failures', noGreen: true, applyConflicts: 0, wallMs: Date.now() - t0, why },
+  });
+  let worktrees: string[];
+  let base: string;
+  try {
+    ({ worktrees, base } = planFanoutWorktrees(root, n));
+  } catch (err) {
+    const why = `建隔离树失败, 退回单份派发: ${String(err).slice(0, 240)}`;
+    logger.warn({ root, n, why }, '[fanout] 建隔离树失败 (fail-open: 活照跑, 只是不扇出)');
+    return bail(why);
+  }
+  try {
+    // D-2: N 份**并行**跑, 受 `OMD_MAX_INFLIGHT_LEAVES` 上限 (与进程级 leaf 在飞上限同一个数)。
+    const capRaw = Number.parseInt(process.env.OMD_MAX_INFLIGHT_LEAVES?.trim() ?? '', 10);
+    const cap = Number.isFinite(capRaw) && capRaw > 0 ? Math.min(n, capRaw) : n;
+    const execs: Array<ExecutorDagResult | undefined> = new Array(n).fill(undefined);
+    const errs: Array<string | undefined> = new Array(n).fill(undefined);
+    for (let start = 0; start < n; start += cap) {
+      await Promise.all(
+        worktrees.slice(start, start + cap).map(async (wt, k) => {
+          const i = start + k;
+          try {
+            execs[i] = await runOne({ cwd: wt, runIdSuffix: `f${i}` });
+          } catch (err) {
+            // 一份塌了不带塌其余 (这正是扇出的意义); 原文留证据后进 `errs`, 它的判词就是这段话。
+            errs[i] = String(err instanceof Error ? err.message : err).slice(0, 240);
+            logger.warn({ seq, attempt: i, worktree: wt, err: errs[i] }, '[fanout] 第 i 份尝试的子 run 抛错 → 这一份作废, 其余照跑');
+          }
+        }),
+      );
+    }
+    // D-3 ①: 每份在**自己那棵树里**跑同一条冻结判据。跑不成的那一份不进绿名单 (判词原文即证据)。
+    const runCriterion = deps.fanoutRunCriterion ?? defaultFanoutCriterion;
+    const attempts: FanoutAttempt[] = [];
+    for (let i = 0; i < n; i++) {
+      const worktree = worktrees[i]!;
+      let exitCode: number | null = null;
+      let text = errs[i] ?? '';
+      if (execs[i]) {
+        try {
+          const r = await runCriterion({ command, cwd: worktree });
+          exitCode = r.exitCode;
+          text = r.text;
+        } catch (err) {
+          text = String(err instanceof Error ? err.message : err).slice(0, 240);
+          logger.warn({ seq, attempt: i, worktree, err: text }, '[fanout] 判据在这棵树里跑不起来 → 这一份按红算');
+        }
+      }
+      attempts.push({
+        index: i,
+        worktree,
+        exitCode,
+        failing: countFailingCases(text, exitCode, expectExit),
+        diff: execs[i] ? captureAttemptDiff(worktree, base) : '',
+      });
+    }
+    const ran = execs.filter(Boolean).length;
+    const { green, ranked } = scoreAttempts(attempts, expectExit);
+    // D-3 ③: ≥2 绿才交比较卷 —— 判官缺席 (没配 verifier 座) 时 `compare` 为 undefined, chooseAttempt 退机械档。
+    const comparator = deps.compareFanout ?? buildFanoutComparator(deps, task);
+    const choice = await chooseAttempt(attempts, comparator, expectExit);
+    // D-4: 赢家 diff 打回主工作区; 打不上去按名次退次优, 全打不上去 ⇒ 退回单份派发。
+    const apply = deps.fanoutApply ?? applyWinner;
+    const order = [choice.chosen, ...ranked.filter((i) => i !== choice.chosen)];
+    let applyConflicts = 0;
+    let applied: number | undefined;
+    let lastWhy: string | undefined;
+    for (const i of order) {
+      if (!execs[i]) continue; // 这一份根本没跑成, 没有可合回的字节
+      const r = apply(root, attempts[i]!);
+      if (r.applied) {
+        applied = i;
+        break;
+      }
+      applyConflicts++;
+      lastWhy = r.why;
+    }
+    const facts: FanoutLedger = {
+      n,
+      ran,
+      green: green.length,
+      // 记的是**真进了主工作区**的号; 一份都没进 ⇒ -1 (不拿择优点的号冒充已合回, §静默坑 1)。
+      chosen: applied ?? -1,
+      // 退过次优 ⇒ 最终这一份是机械档挑的, 不是判官挑的 —— 别把判官的名字挂在它没选的那份上。
+      chosenBy: applied === choice.chosen ? choice.by : 'least-failures',
+      noGreen: choice.noGreen,
+      applyConflicts,
+      wallMs: Date.now() - t0,
+      ...(applied === undefined ? { why: `${n} 份尝试全部合不回主工作区, 退回单份派发。最后一条: ${lastWhy ?? '(没有可合回的字节)'}` } : {}),
+    };
+    logger.info({ seq, ...facts, reason: choice.reason?.slice(0, 200) }, '[fanout] 扇出结束');
+    return { ...(applied !== undefined ? { exec: execs[applied]! } : {}), facts };
+  } finally {
+    // D-2: 每棵树跑完必须删干净 —— 不论上面走的是哪条出口。
+    disposeFanoutWorktrees(root, worktrees);
+  }
+}
+
+/**
+ * 比较卷上那段「原始任务」。取的是**这张卡上的派工文本** (`goal` + `brief`), 不是 conductor 的整个
+ * goal —— 几份候选跑的就是这张卡, 拿整个 run 的目标去比会把没派出去的部分也算进"覆盖不全"。
+ * 两个槽都取不到 ⇒ 退回 conductor 面上的 goal (总比空卷面强)。
+ */
+function conductorTaskOf(params: unknown, deps: ConductorRuntimeDeps): string {
+  const p = params && typeof params === 'object' ? (params as { goal?: unknown; brief?: unknown }) : {};
+  const parts = [typeof p.goal === 'string' ? p.goal : '', typeof p.brief === 'string' ? p.brief : ''].filter(Boolean);
+  return parts.length > 0 ? parts.join('\n\n') : deps.ctx.acceptance?.command ?? '';
+}
+
+/** 比较卷判官: 有 verifier 座才造; 没座位 ⇒ `undefined` (择优退机械档, 不假装调过)。 */
+function buildFanoutComparator(
+  deps: ConductorRuntimeDeps,
+  task: string,
+): ((green: FanoutAttempt[]) => Promise<{ index: number; reason: string }>) | undefined {
+  const model = deps.ctx.seats?.verify;
+  if (!model) {
+    logger.info({}, '[fanout] 没有 verifier 座 → 多份绿时按 least-failures 机械选 (不调判官)');
+    return undefined;
+  }
+  const compare = createFanoutComparator({ model });
+  return (green) => compare(task, green);
+}
+
 export function createConductorRuntimeTools(deps: ConductorRuntimeDeps): AnyOmdTool[] {
   const cards = createConductorTools(deps.ctx);
   let seq = 0;
   /** 2-C: 本 run 里每个子节点最后一次的结果 (键 = 带前缀的节点 id), resume_of 回灌的来源。 */
   const priorById = new Map<string, LeafResult>();
   const freeze = initFreezeState(deps);
-  return cards.map((card) => adaptCard(card, deps, () => ++seq, priorById, freeze));
+  const fanout = initFanoutState(deps);
+  return cards.map((card) => adaptCard(card, deps, () => ++seq, priorById, freeze, fanout));
 }
 
-function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () => number, priorById: Map<string, LeafResult>, freeze?: FreezeState): AnyOmdTool {
+function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () => number, priorById: Map<string, LeafResult>, freeze?: FreezeState, fanout?: FanoutState): AnyOmdTool {
   return {
     name: card.name,
     label: card.name,
@@ -475,14 +688,25 @@ function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () 
       };
       let exec: ExecutorDagResult;
       // 1-A: 冻住之后, 子 run 在路径禁令里跑 —— 工具写到冻结文件当场拒 (agent-tools:664)。没冻 / 不适用 → 直接跑, 逐字节同旧。
-      const guarded = (): Promise<ExecutorDagResult> =>
-        freeze && freeze.frozen ? (deps.withProtected ?? withProtectedPaths)(freeze.protectedFiles, () => deps.runChild(plan, n)) : deps.runChild(plan, n);
+      // `over` 缺席 = 派在主工作区 (老路径, 逐字节同旧); 在场 = R5 扇出换了一棵树。
+      const guarded = (over?: { cwd: string; runIdSuffix?: string }): Promise<ExecutorDagResult> =>
+        freeze && freeze.frozen ? (deps.withProtected ?? withProtectedPaths)(freeze.protectedFiles, () => deps.runChild(plan, n, over)) : deps.runChild(plan, n, over);
       // 盘上改动快照 (2026-09-06, writeset/disk-delta): 派发前拍一次, 回来再拍一次, 差集并进写集对账 ——
       // worker 经 shell 改的文件不进 filesTouched, 只靠工具上报会把声明文件全记成 missing (pathfix 臂 17/80)。
       const diskBefore = snapshotDisk(deps.ctx.cwd);
       if (diskBefore.why) logger.info({ seq: n, why: diskBefore.why }, '[orchestrating-loop] 盘上快照没拍成 (派发前) → 写集对账只靠工具上报');
       try {
-        exec = await guarded();
+        // R5 扇出 (D-1): 本 run **首次** `work` 派发 + 开关在档 ⇒ 同一张 plan 在 N 棵隔离树里并行跑一遍,
+        // 冻结判据逐份跑分, 赢家 diff 合回主工作区。扇出没能交付 (建树失败 / 全合不回) ⇒ 退回单份派发。
+        const fan = fanout && !fanout.used && card.name === 'work' ? fanout : undefined;
+        if (fan) {
+          fan.used = true; // 成不成都只扇这一次 (INV-6): 失败了再扇一遍只是再撞一次同一堵墙
+          const r = await runWorkFanout({ deps, n: fan.n, seq: n, task: conductorTaskOf(params, deps), runOne: guarded });
+          if (deps.ledger) deps.ledger.fanout = r.facts;
+          exec = r.exec ?? (await guarded());
+        } else {
+          exec = await guarded();
+        }
       } catch (err) {
         // 嵌套 run 抛错 = 引擎侧事故, 不是 conductor 的错: 原文回给 conductor (它据此决定换形状还是上报), 不吞。
         const msg = String(err instanceof Error ? err.message : err).slice(0, 600);

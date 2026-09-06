@@ -472,6 +472,110 @@ export function createDefaultVerifier(opts: DefaultVerifierOpts): VerifierFn {
   };
 }
 
+// ── R5 并行实装扇出的**比较卷** (2026-09-06, 契约 D-3 ③) ─────────────────────
+
+/**
+ * 一份候选实装在比较卷上的全部事实。判据结果**每份都一样地在场** —— 它们已经全过了同一条
+ * 冻结判据 (只有绿的才进这张卷), 所以卷面问的不是"过没过", 而是"哪一份改得更对"。
+ */
+export interface FanoutCompareCandidate {
+  index: number;
+  exitCode: number | null;
+  failing: number;
+  diff: string;
+}
+
+/** 比较卷的输出面 —— 二字段, 与 `VERIFIER_VERDICT_SCHEMA` 无关 (D-7: 不动既有判词逻辑)。 */
+export const FANOUT_COMPARE_SCHEMA = z.object({
+  index: z.number().int(),
+  reason: z.string(),
+});
+
+/** 单份 diff 进卷面的字符上限 —— 超出截断并写明截了多少 (「卷面被截过」不许静默)。 */
+const FANOUT_DIFF_CAP = 12_000;
+
+/**
+ * 比较卷的卷面 (D-3 ③)。**与 `verifierPrompt` 完全分开**: 那一份是「攻击结果、默认怀疑」,
+ * 这一份是「几份都过了同一条判据, 挑一份」—— 把选优塞进那份卷面会让它默认判 fail, 而这里
+ * 没有"全都不选"这个出口 (机械档已经保证候选全绿)。
+ *
+ * 判据结果照抄进卷面而不是省略: 三份的退出码相同这件事本身就是判词的一部分 ——
+ * 「判据分不开优劣」正是预注册里要收的那一格。
+ */
+export function renderFanoutComparePaper(task: string, candidates: readonly FanoutCompareCandidate[]): string {
+  const blocks = candidates.map((c) => {
+    const truncated = c.diff.length > FANOUT_DIFF_CAP;
+    const body = truncated ? `${c.diff.slice(0, FANOUT_DIFF_CAP)}\n… (已截断, 原文 ${c.diff.length} 字符)` : c.diff;
+    return [
+      `===== 候选 #${c.index} =====`,
+      `冻结判据: 退出码 ${c.exitCode === null ? 'null (死于信号)' : c.exitCode} · 失败用例 ${c.failing}`,
+      body || '(这一份相对基线零改动)',
+    ].join('\n');
+  });
+  return [
+    '你在给同一个任务的几份**并行实装**挑一份。它们跑的是同一条 brief、同一条冻结判据, 而且**都已经过了那条判据** ——',
+    '所以不要再判"过没过", 判的是「哪一份改得更对」。',
+    '',
+    '挑选顺序 (前面的压后面的):',
+    '1. **改到了根上** —— 治的是成因, 不是把症状挡掉 (加特判 / 改测试预期 / 兜异常让它别抛, 都算挡症状);',
+    '2. **覆盖完整** —— 同一个成因的其它调用点也一起改了, 不是只让判据点名的那一处过;',
+    '3. **越界最少** —— 与任务无关的重构 / 顺手改的格式 / 新加的抽象, 都是减分项;',
+    '4. 前三条分不开时, **改动更小的那一份**。',
+    '',
+    '原始任务:',
+    '---',
+    task,
+    '---',
+    '',
+    ...blocks,
+    '',
+    '输出 JSON 两字段:',
+    '- index (int): 你选的候选号, **必须**是上面出现过的号之一。',
+    '- reason (string): 为什么是它 —— 点名它做到了而别的没做到的那一条 (机制级, 不是"看起来更好")。',
+  ].join('\n');
+}
+
+export interface FanoutComparatorOpts {
+  /** 比较卷坐哪个座 (通常 = verifier 座)。falsy → 调用时抛, 由扇出层退回机械档。 */
+  model: string | undefined;
+  /** 注入式 callModel (测试)。默认真 callModel。 */
+  callModelFn?: typeof send;
+  thinkingLevel?: 'off' | 'low' | 'medium' | 'high' | 'xhigh';
+}
+
+/**
+ * 造一个比较卷判官 (D-3 ③)。**只在 ≥2 份绿时被调一次** —— 调用点在 `goal/orchestrating-loop.ts`。
+ *
+ * 拿不到结构化输出 / 点了不存在的号 ⇒ **抛**, 不猜: 扇出层接住这一抛退到 `least-failures`
+ * (机械档), 那比让判官的一个坏输出决定合回哪份字节安全。
+ */
+export function createFanoutComparator(
+  opts: FanoutComparatorOpts,
+): (task: string, candidates: readonly FanoutCompareCandidate[]) => Promise<{ index: number; reason: string }> {
+  const call = opts.callModelFn ?? send;
+  return async (task, candidates) => {
+    if (!opts.model) throw new Error('fanout compare: model 必填 (形如 provider:modelId)');
+    const r = await withGoFallback(opts.model, (m) =>
+      call({
+        model: m,
+        // #144 同款: 这一发带 role, 否则落进 seat-usage 的 `(unattributed)` 桶。
+        meta: { role: 'verifier' },
+        messages: [{ role: 'user', content: renderFanoutComparePaper(task, candidates) }],
+        ...effectiveSeatSampling('verifier'),
+        maxTokens: 4096,
+        thinkingLevel: opts.thinkingLevel ?? seatSpec('verifier')?.thinking ?? 'xhigh',
+        responseSchema: FANOUT_COMPARE_SCHEMA,
+      }),
+    );
+    const v = r.parsed as { index?: unknown; reason?: unknown } | undefined;
+    const index = typeof v?.index === 'number' ? v.index : Number.NaN;
+    if (!candidates.some((c) => c.index === index)) {
+      throw new Error(`fanout compare: 判官点了候选 ${String(v?.index)}, 不在候选名单 [${candidates.map((c) => c.index).join(', ')}] 里`);
+    }
+    return { index, reason: typeof v?.reason === 'string' ? v.reason : '(判官没写理由)' };
+  };
+}
+
 export interface ResolveVerificationOpts {
   /** 关掉校验 (返空 config = 无 verifier, executor-dag 退回无校验老行为)。默认开。 */
   enabled?: boolean;
