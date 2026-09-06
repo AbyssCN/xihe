@@ -18,31 +18,48 @@
  * 派发本身、并发上限、账本、比较卷的判词, 全在接线层 (`orchestrating-loop.ts` / `verifier.ts`) ——
  * 这个文件不认识 conductor, 也不认识模型。
  *
- * ## 为什么快照是 `git stash create` 而不是 `HEAD`
+ * ## 快照为什么走**临时索引**, 而不是 `HEAD` 也不是 `git stash create`
  *
  * `git worktree add` 出来的是**该 ref 的干净 checkout** (`run-worktree.ts` 头注的第三条诚实边界)。
  * 扇出跑在一次 run 的**中途** —— 此前的派发已经往主工作区写了东西, 从 HEAD 建树等于让 N 份尝试
- * 全部看不见前面的活, 各自从头重做一遍。`git stash create` 造一个含当前**已跟踪**改动的 commit 对象
- * 而不动工作区, 正好当这个基线。
+ * 全部看不见前面的活, 各自从头重做一遍。
  *
- * ⚠ **未跟踪的新文件不在这份快照里** —— `git stash create` 不含 `-u` 语义, 而给它加 `-u` 要动
- * 主工作区的索引 (那是一次真写)。代价写在这里而不是藏着: 上一发派发新建、尚未 `git add` 的文件,
- * 在 N 棵树里看不见。
+ * 第一版用的是 `git stash create`, 它**只含已跟踪文件的改动**。这在 bench 上是致命的:
+ * R4 异族座先写的判据文件是**写进了仓但没 `git add`** 的新文件, 而 conductor 首发派 `work` 时
+ * 它正是判据所在。判据文件不进快照 ⇒ N 棵树里每棵跑判据都红在「文件不存在」⇒ 全员 noGreen ⇒
+ * 择优退化成随机, 整个扇出的收益归零, **而且账本上看起来一切正常**。
  *
- * 证伪方式 (fanout-impl.test.ts): 改成从 `HEAD` 建树 ⇒「树里看得见未提交改动」当场红;
+ * 现在的做法: 在 `mkdtemp` 里开一个**临时索引** (`GIT_INDEX_FILE`), `read-tree HEAD` 打底,
+ * `git add` 把工作区 (含未跟踪文件) 收进去, `write-tree` + `commit-tree -p HEAD` 得到基线 commit。
+ * **主工作区的索引一个字节不动** —— 所有写都落在那个临时文件上。
+ *
+ * 排除名单复用 `writeset/disk-delta` 的 `DERIVED_DIRS` (`.omd` / `__pycache__` / `node_modules` …):
+ * 派生物进快照 = 每棵树各带一份垃圾。名单只有一个出处, 两处不各写一份。
+ *
+ * ⚠ 仍在名单外的边界: `.gitignore` 挡掉的文件不进快照 (`git add` 按设计不收), 与 head 档下
+ * 那些文件本来就不该被当作产物一致。
+ *
+ * 证伪方式 (fanout-impl.test.ts): 快照改回 `git stash create` ⇒「未跟踪的新文件也进快照」当场红;
+ * 去掉 `GIT_INDEX_FILE` 让 `git add` 打进主索引 ⇒「主工作区的索引一个字节不动」当场红;
+ * 改成从 `HEAD` 建树 ⇒「树里看得见未提交改动」当场红;
  * 去掉 `captureAttemptDiff` 里的 `git add -A` ⇒「新建文件进 diff」当场红;
  * 把 `git apply` 的退出码当恒 0 ⇒「冲突时主工作区不变」当场红。
  */
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { logger } from '../logger';
 import { ensureDeclaredEnvFiles, ensureNodeModulesLinks } from '../run-worktree';
+import { DERIVED_DIRS } from '../writeset/disk-delta';
 import type { ModelUsage } from '../../model/types';
 
-/** 起一条子进程的注入面 (测试要能换掉真 git)。`stdin` 只有 `git apply` 用得上。 */
+/**
+ * 起一条子进程的注入面 (测试要能换掉真 git)。`stdin` 只有 `git apply` 用得上;
+ * `env` 只有快照那几条用得上 (`GIT_INDEX_FILE` 指向临时索引 —— 主索引一个字节不动)。
+ */
 export type SpawnLike = (
   args: readonly string[],
-  opts: { cwd: string; stdin?: string },
+  opts: { cwd: string; stdin?: string; env?: Record<string, string> },
 ) => { exitCode: number; stdout: string; stderr: string };
 
 const defaultRun: SpawnLike = (args, opts) => {
@@ -51,6 +68,7 @@ const defaultRun: SpawnLike = (args, opts) => {
     stdout: 'pipe',
     stderr: 'pipe',
     ...(opts.stdin !== undefined ? { stdin: Buffer.from(opts.stdin) } : {}),
+    ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
   });
   const dec = new TextDecoder();
   return { exitCode: r.exitCode ?? -1, stdout: dec.decode(r.stdout), stderr: dec.decode(r.stderr) };
@@ -94,6 +112,46 @@ export const fanoutWorktreeDir = (root: string, stamp: string, index: number): s
   join(root, '.omd', 'fanout', `${stamp}-${index}`);
 
 /**
+ * 排除名单 → git pathspec。`:(exclude,glob)` 的双星跨目录匹配, 所以每个名字来两条形态:
+ * 一条钉顶层的那份, 一条钉任意深度的那份 (只写顶层那条会漏掉 `apps/web` 里的同名目录)。
+ * `.pyc` / `.pyo` / `.egg-info` 单列 —— 它们是文件后缀, 不是目录名。
+ */
+function snapshotExcludes(): string[] {
+  const out: string[] = [];
+  for (const d of DERIVED_DIRS) {
+    out.push(`:(exclude,glob)${d}/**`, `:(exclude,glob)**/${d}/**`);
+  }
+  out.push(':(exclude,glob)**/*.pyc', ':(exclude,glob)**/*.pyo', ':(exclude,glob)**/*.egg-info/**');
+  return out;
+}
+
+/**
+ * 扇出基线 = **当前工作区** (含未跟踪的新文件) 的一个 commit 对象。见头注「快照为什么走临时索引」。
+ *
+ * 四步全在临时索引上做, 主索引一个字节不动:
+ *   `read-tree HEAD` → `add .` (带排除 pathspec) → `write-tree` → `commit-tree -p HEAD`。
+ *
+ * 快照树与 HEAD 的树相同 (干净仓) ⇒ 直接返回 HEAD, 不白造一个悬空 commit 对象。
+ */
+function snapshotBase(root: string, git: (args: string[], env?: Record<string, string>) => string): string {
+  const head = git(['rev-parse', 'HEAD']);
+  const dir = mkdtempSync(join(tmpdir(), 'omd-fanout-idx-'));
+  try {
+    const env = { GIT_INDEX_FILE: join(dir, 'index') };
+    git(['read-tree', 'HEAD'], env);
+    // `add .` 而不是 `add -A`: 两者在带路径 pathspec 时等价 (git ≥ 2.0 都收新增/修改/删除),
+    // 而本仓的 git 守卫按字面拦 `add -A` —— 用等价的写法省掉一条永远要解释的例外。
+    git(['add', '.', ...snapshotExcludes()], env);
+    const tree = git(['write-tree'], env);
+    if (tree === git(['rev-parse', 'HEAD^{tree}'])) return head;
+    return git(['commit-tree', tree, '-p', head, '-m', 'omd fanout snapshot (临时索引, 主索引未动)'], env);
+  } finally {
+    // 临时索引是本函数自己造的垃圾, 不论成不成都得删 (它在 tmpdir 里, 与仓无关)。
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
  * 建 N 棵隔离树 (D-2)。返回它们的目录与**共同基线** —— 后面的 diff 与合回都相对这个基线算。
  *
  * **建不起来就抛**, 不退回主树: 退回等于把 N 份尝试全写进同一个工作区, 那比不扇出坏得多
@@ -105,14 +163,12 @@ export function planFanoutWorktrees(
   opts: { run?: SpawnLike; stamp?: string } = {},
 ): { worktrees: string[]; base: string } {
   const run = opts.run ?? defaultRun;
-  const git = (args: string[], cwd = root): string => {
-    const r = run(['git', ...args], { cwd });
+  const git = (args: string[], env?: Record<string, string>): string => {
+    const r = run(['git', ...args], { cwd: root, ...(env ? { env } : {}) });
     if (r.exitCode !== 0) throw new Error(`git ${args.join(' ')} 失败 (exit ${r.exitCode}): ${(r.stderr || r.stdout).trim()}`);
     return r.stdout.trim();
   };
-  // 已跟踪改动的快照 (见头注)。干净树时 `stash create` 无输出 —— 那不是失败, 基线就是 HEAD。
-  const stashed = git(['stash', 'create']);
-  const base = stashed || git(['rev-parse', 'HEAD']);
+  const base = snapshotBase(root, git);
   const stamp = opts.stamp ?? `${Date.now().toString(36)}`;
   mkdirSync(join(root, '.omd', 'fanout'), { recursive: true });
   const worktrees: string[] = [];

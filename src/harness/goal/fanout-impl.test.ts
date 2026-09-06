@@ -13,7 +13,7 @@
  *  · `applyWinner` 把 `git apply` 的退出码当成恒 0 ⇒ 「冲突时主工作区不变」当场红。
  */
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -49,6 +49,17 @@ function repo(dirty = false): string {
   return root;
 }
 
+/** 主工作区的 git 状态原文 —— 快照前后必须逐字相同 (`.omd/` 是引擎自己的目录, 不进比较)。 */
+function porcelain(root: string): string {
+  const r = Bun.spawnSync(['git', 'status', '--porcelain', '--untracked-files=normal'], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
+  return new TextDecoder()
+    .decode(r.stdout)
+    .split('\n')
+    .filter((l) => l.trim() && !l.includes('.omd/'))
+    .sort()
+    .join('\n');
+}
+
 const attempt = (index: number, exitCode: number | null, failing: number, diff = 'D'): FanoutAttempt => ({
   index,
   worktree: `/wt/${index}`,
@@ -76,7 +87,7 @@ describe('planFanoutWorktrees —— N 棵隔离树, 带上主树未提交的改
     try {
       const { worktrees, base } = planFanoutWorktrees(root, 3);
       expect(worktrees).toHaveLength(3);
-      expect(base).not.toBe(git(['rev-parse', 'HEAD'], root)); // stash create 造了一个新 commit 对象
+      expect(base).not.toBe(git(['rev-parse', 'HEAD'], root)); // 临时索引快照造了一个新 commit 对象
       for (const wt of worktrees) expect(readFileSync(join(wt, 'a.txt'), 'utf8')).toContain('uncommitted');
       disposeFanoutWorktrees(root, worktrees);
       for (const wt of worktrees) expect(Bun.spawnSync(['test', '-d', wt]).exitCode).not.toBe(0);
@@ -85,13 +96,55 @@ describe('planFanoutWorktrees —— N 棵隔离树, 带上主树未提交的改
     }
   });
 
-  test('★ 干净树 ⇒ base 退回 HEAD (stash create 无输出不是失败)', () => {
+  test('★ 干净树 ⇒ base 退回 HEAD (快照树与 HEAD 同一棵时不白造 commit 对象)', () => {
     const root = repo(false);
     try {
       const { worktrees, base } = planFanoutWorktrees(root, 2);
       expect(base).toBe(git(['rev-parse', 'HEAD'], root));
       expect(worktrees).toHaveLength(2);
       disposeFanoutWorktrees(root, worktrees);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('★ **未跟踪**的新文件也进快照 —— R4 异族座先写的判据文件正是这一型 (证伪: 快照改回 `git stash create` ⇒ 本条红)', () => {
+    const root = repo(false);
+    try {
+      // 判据文件写进了仓但没 git add —— conductor 首发派 work 时它就长这样。
+      mkdirSync(join(root, 'tests'), { recursive: true });
+      writeFileSync(join(root, 'tests/test_x.py'), 'def test_x():\n    assert 1 == 1\n');
+      // 派生物: 排除名单里的东西不许进快照 (进了就在 N 棵树里各带一份垃圾, 且判据对账被噪声淹没)。
+      mkdirSync(join(root, 'src', '__pycache__'), { recursive: true });
+      writeFileSync(join(root, 'src', '__pycache__', 'm.pyc'), 'junk');
+      mkdirSync(join(root, '.omd', 'runs'), { recursive: true });
+      writeFileSync(join(root, '.omd', 'runs', 'r.json'), '{}');
+      const { worktrees } = planFanoutWorktrees(root, 3);
+      for (const wt of worktrees) {
+        expect(readFileSync(join(wt, 'tests/test_x.py'), 'utf8')).toBe('def test_x():\n    assert 1 == 1\n');
+        expect(existsSync(join(wt, 'src', '__pycache__', 'm.pyc'))).toBe(false);
+        expect(existsSync(join(wt, '.omd', 'runs', 'r.json'))).toBe(false);
+      }
+      disposeFanoutWorktrees(root, worktrees);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('★ 主工作区的索引一个字节不动 (证伪: 去掉 GIT_INDEX_FILE 让 `git add` 打进主索引 ⇒ 本条红)', () => {
+    const root = repo(false);
+    try {
+      mkdirSync(join(root, 'tests'), { recursive: true });
+      writeFileSync(join(root, 'tests/test_x.py'), 'x = 1\n');
+      writeFileSync(join(root, 'a.txt'), 'base\nuncommitted\n');
+      const before = porcelain(root);
+      const { worktrees } = planFanoutWorktrees(root, 2);
+      // 逐字相同: 未跟踪的仍是 `??`, 已改的仍是 ` M` —— 快照没把它们暂存进主索引。
+      expect(porcelain(root)).toBe(before);
+      expect(before).toContain('?? tests/');
+      expect(before).toContain('M a.txt');
+      disposeFanoutWorktrees(root, worktrees);
+      expect(porcelain(root)).toBe(before);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
