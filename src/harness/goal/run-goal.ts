@@ -810,9 +810,14 @@ function productionCriterionRebuilder(
  * R4 生产出题者: 异族座**一发纯文本**, 无工具 —— 出题人不许碰仓, 它写的每个字节都要过
  * `parseAuthoredFiles` 的形状闸再写入磁盘。没有 `generate` (装配没接注入口) ⇒ 缺席, 走今天那条路。
  */
-function productionCriterionAuthor(config: RunGoalConfig): RunGoalConfig['_authorCriterion'] | undefined {
-  const generate = config.dag.generate;
-  if (!generate) return undefined;
+/**
+ * R4 生产端出题者。`generate` **必须回落到引擎默认实现** —— `config.dag.generate` 是测试注入口, 生产从来不设。
+ * 2026-09-06 code80-m3-author-cons 实测: 只读注入口 ⇒ 80/80 题「开关开着但没有出题者」, 整臂量了个空
+ * (与 classify 那条 2026-07-30 的教训同型: 机制在、测试全绿、生产零生效)。
+ * 证伪: 把 `?? makeDefaultGenerate(...)` 去掉 ⇒ criterion-author-wiring.test.ts「无注入 generate 仍有出题者」红。
+ */
+export function productionCriterionAuthor(config: RunGoalConfig): RunGoalConfig['_authorCriterion'] {
+  const generate = config.dag.generate ?? makeDefaultGenerate(config.dag.sessionId ?? randomUUID());
   return (input) =>
     authorCriterionCrossFamily({
       ...input,
@@ -2121,8 +2126,9 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
     // D-1: 只对**不存在**的判据文件。指向既有测试的判据不动 (那一类 reward 最高)。
     const missingFiles = missingPathArgs(runnable.command, config.cwd);
     const author = missingFiles.length ? config._authorCriterion ?? productionCriterionAuthor(config) : undefined;
-    if (missingFiles.length && !author) {
-      logger.info({ missingFiles }, '[run-goal] R4 开关开着但没有出题者 (装配没接 generate) → 判据仍由执行侧自写');
+    if (!missingFiles.length) {
+      // 三态 (§静默坑 1): 开关开着但不适用 (判据指向既有文件) 也要留一格, 与「没开」分得开。
+      loopLedger.criterionAuthor = { attempted: false, accepted: false, why: 'not-applicable: 判据不引用未存在文件' };
     }
     if (author) {
       try {
