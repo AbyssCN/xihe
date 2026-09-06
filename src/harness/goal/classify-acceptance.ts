@@ -305,7 +305,10 @@ function probeRepo(root: string): ProbeResult {
 
 /**
  * 三候选共识的开关 (D-6)。**只认字面 `1`** —— 半开的开关 (`true` / `yes` / `0`) 会长成又一个
- * 说不清自己在不在的旋钮; 默认关是因为它要先当单变量臂量一批读数, 不是先上生产。
+ * 说不清自己在不在的旋钮。
+ * 2026-09-06 两次单变量读数 (consensus2 − survey +0.051, pathfix-cons − pathfix +0.054) 后共识进基础配置:
+ * **默认开放在生产入口** (`applyProductionEnvDefaults`, 缺席时置 `1`), 引擎函数本身仍只认显式值 ——
+ * 这样测试与注入调用零改动 (直接翻函数默认会让所有走真 classifyGoal 的假 generate 用例多发两次)。
  */
 function consensusEnabled(): boolean {
   return process.env.OMD_CRITERION_CONSENSUS?.trim() === '1';

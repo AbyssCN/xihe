@@ -47,7 +47,7 @@ afterEach(() => {
   clearRoleModel('escalation');
 });
 
-describe('INV-4 开关缺席 ⇒ 这次改动一个字节都不发生', () => {
+describe('INV-4 开关缺席 ⇒ 这次改动一个字节都不发生 (默认开放在生产入口 applyProductionEnvDefaults, 不在本函数)', () => {
   test('分类恰一发, prompt 与 classifyPrompt 逐字相同, ledger 无 criterionConsensus', async () => {
     const { generate, calls } = scripted([execJson('bun test src/a.test.ts')]);
     const c = await classifyGoal('给 foo 加校验', { generate, model: CONDUCTOR });

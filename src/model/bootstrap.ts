@@ -20,10 +20,31 @@ import { warnUnregisteredRoles } from './role-fallback';
 import { readConfigPath } from './role-models';
 
 /**
+ * 生产入口的 env 缺省 (2026-09-06)。**只补缺席的键, 不覆盖**; `bun test` (NODE_ENV=test) 下不动 ——
+ * 测试与注入调用要的是显式、可数的行为, 缺省在那里会让所有走真 classifyGoal 的假 generate 用例多发两次。
+ *
+ * · `OMD_CRITERION_CONSENSUS=1`: 三候选共识进基础配置。两次单变量读数 (code80-m3, 1σ=0.035):
+ *   consensus2 − survey +0.051 (7 升 1 降) · pathfix-cons − pathfix +0.054 (6 升 2 降)。
+ *   引擎函数 `consensusEnabled` 仍只认字面 `1`; 显式 `=0` 是逃生口。
+ *
+ * 证伪: 去掉这里的 `??=` ⇒ bootstrap-env-defaults.test.ts「缺席 ⇒ 置 1」红。
+ */
+export function applyProductionEnvDefaults(env: NodeJS.ProcessEnv = process.env, nodeEnv: string | undefined = env.NODE_ENV): string[] {
+  if (nodeEnv === 'test') return [];
+  const applied: string[] = [];
+  if (env.OMD_CRITERION_CONSENSUS === undefined) {
+    env.OMD_CRITERION_CONSENSUS = '1';
+    applied.push('OMD_CRITERION_CONSENSUS=1');
+  }
+  return applied;
+}
+
+/**
  * 引导短命进程的模型运行时: 内置 provider 注册 + models.json 自定 provider 叠加。
  * @returns 注册的 provider 名数组。
  */
 export function bootstrapModelRuntime(): string[] {
+  applyProductionEnvDefaults();
   // ⓪ 先把**能找到的** .env 灌进 process.env (2026-09-05)。Bun 只自动加载 cwd 那份, 于是
   //    `cd` 到任何别的仓跑 omd 就 `providers=[⚠空]` —— 整个 run 烧完才失败 (实账 3e572428,
   //    26m16s 零产出)。发现链与优先序见 model/env-discovery 模块头; 不覆盖已存在的键,
