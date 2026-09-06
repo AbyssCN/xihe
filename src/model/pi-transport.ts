@@ -53,6 +53,7 @@ import { createKimiCodingOAuthProvider } from './kimi-oauth';
 import { createOpenAICodexOAuthProvider } from './openai-codex-oauth';
 import type { ContentPart, ModelMessage, ModelRequest, ModelUsage } from './types';
 import { ModelError, reasoningEffortFor } from './index';
+import { thinkingTypeFor } from './minimax-native';
 import { logger } from '../logger';
 
 export type PiModel = Model<Api>;
@@ -543,7 +544,8 @@ export async function piRequest(
             // 而那张词表的用途是"哪些 reasoning_effort 字面量会被该 provider 拒" —— minimax 压根
             // 不认 reasoning_effort, 拿它的过滤结果去决定"开不开思考"是借错了尺子。
             // (实测踩到: caps 命中与否会让同一个 'off' 在两条路径上得出相反结果, ★② 当场红。)
-            body.thinking = { type: req.thinkingLevel === 'off' ? 'disabled' : 'adaptive' };
+            // 三档与 minimax-native 的 thinkingTypeFor 同一张表 (single source): off→disabled · high/xhigh→enabled · 其余→adaptive。
+            body.thinking = { type: thinkingTypeFor(req.thinkingLevel) };
           }
           return body;
         }

@@ -124,9 +124,16 @@ async function resolveKey(provider: string): Promise<string | undefined> {
   return resolvePiApiKey(provider);
 }
 
-/** `thinkingLevel` → minimax `thinking.type`。**只有显式 'off' 才关**,其余一律 adaptive。 */
-export function thinkingTypeFor(level: ModelRequest['thinkingLevel']): 'adaptive' | 'disabled' {
-  return level === 'off' ? 'disabled' : 'adaptive';
+/**
+ * `thinkingLevel` → minimax `thinking.type`(M3 三档: enabled / adaptive / disabled)。
+ * 'off' → disabled;'high' / 'xhigh' → **enabled**(始终推理);其余(缺席 / low / medium)→ adaptive。
+ * 2026-09-06 之前只翻两档(off 之外一律 adaptive),于是 `OMD_AGENT_EFFORT=high` 对 M3 等于没动,
+ * code80-m3-author-effort 臂白跑。证伪: 把 enabled 那支去掉 ⇒ minimax-native-thinking.test.ts 红。
+ */
+export function thinkingTypeFor(level: ModelRequest['thinkingLevel']): 'enabled' | 'adaptive' | 'disabled' {
+  if (level === 'off') return 'disabled';
+  if (level === 'high' || level === 'xhigh') return 'enabled';
+  return 'adaptive';
 }
 
 /** 本仓 usage 语义: `in` = 总 prompt token(**含**命中段), `cacheHit ⊆ in`, `out` = 生成(含推理)。 */
