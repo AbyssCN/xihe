@@ -1,7 +1,8 @@
 /**
  * MiniMax M3 三档 thinking 映射 (2026-09-06)。
- * 现场: 引擎此前只翻两档 (off→disabled, 其余→adaptive), `OMD_AGENT_EFFORT=high` 对 M3 等于没动,
- * code80-m3-author-effort 臂白跑。证伪: 把 `enabled` 那支去掉 ⇒ ★ 红。
+ * 2026-09-06 曾按控制台截图加了 high/xhigh→enabled 一档; 2026-09-07 直打原生端点实测 **API 拒 `enabled`**
+ * (`base_resp 2013 … allowed: adaptive, disabled`), 于是撤回: off 之外一律 adaptive。
+ * 证伪: 把 high 翻回 'enabled' ⇒ ★ 红。
  */
 import { describe, expect, test } from 'bun:test';
 import { isMinimaxModel, thinkingTypeFor } from './minimax-native';
@@ -18,10 +19,10 @@ describe('isMinimaxModel: 按 provider 或模型 id 认', () => {
   });
 });
 
-describe('thinkingTypeFor: MiniMax 三档', () => {
-  test('★ high / xhigh → enabled (始终推理)', () => {
-    expect(thinkingTypeFor('high')).toBe('enabled');
-    expect(thinkingTypeFor('xhigh')).toBe('enabled');
+describe('thinkingTypeFor: MiniMax 只有两档 (API 实测拒 enabled)', () => {
+  test('★ high / xhigh → adaptive (enabled 在原生端点上不存在, 发了整发被拒)', () => {
+    expect(thinkingTypeFor('high')).toBe('adaptive');
+    expect(thinkingTypeFor('xhigh')).toBe('adaptive');
   });
   test('off → disabled', () => {
     expect(thinkingTypeFor('off')).toBe('disabled');

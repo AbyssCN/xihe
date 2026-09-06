@@ -49,8 +49,8 @@ describe('thinking —— 本文件存在的主要理由', () => {
     // disabled 便宜一个数量级但推理题归零, 所以它只能是**显式选择**, 不能是默认。
     expect(thinkingTypeFor(undefined)).toBe('adaptive');
     expect(thinkingTypeFor('low')).toBe('adaptive');
-    // 2026-09-06 起 high/xhigh → enabled (三档, 见 minimax-native-thinking.test.ts); 这里只守「缺席=adaptive, off=disabled」。
-    expect(thinkingTypeFor('xhigh')).toBe('enabled');
+    // 2026-09-07: 原生端点实测拒 `enabled` (base_resp 2013), high/xhigh 也是 adaptive (见 minimax-native-thinking.test.ts)。
+    expect(thinkingTypeFor('xhigh')).toBe('adaptive');
     expect(thinkingTypeFor('off')).toBe('disabled');
   });
 

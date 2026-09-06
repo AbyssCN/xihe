@@ -141,9 +141,16 @@ export function isMinimaxModel(provider: string | undefined, id: string | undefi
   return /minimax/i.test(id ?? '');
 }
 
-export function thinkingTypeFor(level: ModelRequest['thinkingLevel']): 'enabled' | 'adaptive' | 'disabled' {
+/**
+ * MiniMax 原生端点的 `thinking.type` **只有两档** (2026-09-07 实测, `/tmp/mm-think-probe.ts` 直打
+ * `chatcompletion_v2`): 发 `enabled` ⇒ HTTP 200 + `base_resp.status_code 2013: invalid thinking.type:
+ * "enabled" (allowed: adaptive, disabled)`。2026-09-06 那版按控制台截图把 high/xhigh 翻成 `enabled`,
+ * code80-m3-enabled2 臂里带上它的那一发当场被拒 (桥转 502)。所以 off 之外一律 adaptive —— 「始终推理」
+ * 这一档在这条 API 上不存在, 不是我们没接。
+ * 证伪: 把 high 翻回 'enabled' ⇒ minimax-native-thinking.test.ts「high / xhigh → adaptive」红。
+ */
+export function thinkingTypeFor(level: ModelRequest['thinkingLevel']): 'adaptive' | 'disabled' {
   if (level === 'off') return 'disabled';
-  if (level === 'high' || level === 'xhigh') return 'enabled';
   return 'adaptive';
 }
 
