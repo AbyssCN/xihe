@@ -130,6 +130,17 @@ async function resolveKey(provider: string): Promise<string | undefined> {
  * 2026-09-06 之前只翻两档(off 之外一律 adaptive),于是 `OMD_AGENT_EFFORT=high` 对 M3 等于没动,
  * code80-m3-author-effort 臂白跑。证伪: 把 enabled 那支去掉 ⇒ minimax-native-thinking.test.ts 红。
  */
+/**
+ * 「这是不是 MiniMax 模型」按 **provider 或模型 id** 认 (2026-09-07)。
+ * bench 容器里坐标是 `bench:MiniMax-M3` (经桥透传), 只看 provider 会判假 ⇒ 请求体不带 `thinking` ⇒ 上游走缺省,
+ * author2-enabled 臂因此没测到 (两臂墙钟/token 逐字相同)。与 `familyOf` 同一条纪律: 家族是模型的属性, 不是路由的。
+ * 证伪: 去掉 id 那支 ⇒ minimax-native-thinking.test.ts「bench: 坐标也认」红。
+ */
+export function isMinimaxModel(provider: string | undefined, id: string | undefined): boolean {
+  if (provider === 'minimax' || provider === 'minimax-cn') return true;
+  return /minimax/i.test(id ?? '');
+}
+
 export function thinkingTypeFor(level: ModelRequest['thinkingLevel']): 'enabled' | 'adaptive' | 'disabled' {
   if (level === 'off') return 'disabled';
   if (level === 'high' || level === 'xhigh') return 'enabled';

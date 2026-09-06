@@ -53,7 +53,7 @@ import { createKimiCodingOAuthProvider } from './kimi-oauth';
 import { createOpenAICodexOAuthProvider } from './openai-codex-oauth';
 import type { ContentPart, ModelMessage, ModelRequest, ModelUsage } from './types';
 import { ModelError, reasoningEffortFor } from './index';
-import { thinkingTypeFor } from './minimax-native';
+import { isMinimaxModel, thinkingTypeFor } from './minimax-native';
 import { logger } from '../logger';
 
 export type PiModel = Model<Api>;
@@ -530,7 +530,8 @@ export async function piRequest(
    *      省 out token 9×、延迟 2×。所以只在调用方**显式要 off** 时才关, 缺省一律 adaptive。
    *      ⚠ M2.x **关不掉**思考 (官方明写), 对它发 disabled 不要假设生效。
    */
-  const isMinimax = model.provider === 'minimax' || model.provider === 'minimax-cn';
+  // 按 provider 或模型 id 认 (2026-09-07): bench 的 `bench:MiniMax-M3` 也要带 thinking 字段, 见 minimax-native.isMinimaxModel。
+  const isMinimax = isMinimaxModel(model.provider, model.id);
   const wantMinimaxShape = isMinimax && model.api === 'openai-completions';
   const onPayload =
     wantTopP !== undefined || wantJsonObject || wantMinimaxShape
