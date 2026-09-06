@@ -47,6 +47,8 @@ import type { ConductorCtx, ConductorTool } from '../conductor/types';
 import { logger } from '../logger';
 import { checkCoords } from './coord-check';
 import { HANDOFF_HEADER, type ReadLedger } from '../read-ledger';
+import { repoRelativePath } from '../repo-path';
+import { diskDelta, snapshotDisk } from '../writeset/disk-delta';
 import { briefHasRepro, computeLoopDispatchFacts, type CriterionFreeze, type ConductorCardLedger, type ConductorCardName } from './loop-ledger';
 
 /** plan 名 —— run-goal 的 `_runDag` 注入口与测试靠它认路径 (与 `goal-execute` / `goal-execute-flat` 同一约定)。 */
@@ -470,6 +472,10 @@ function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () 
       // 1-A: 冻住之后, 子 run 在路径禁令里跑 —— 工具写到冻结文件当场拒 (agent-tools:664)。没冻 / 不适用 → 直接跑, 逐字节同旧。
       const guarded = (): Promise<ExecutorDagResult> =>
         freeze && freeze.frozen ? (deps.withProtected ?? withProtectedPaths)(freeze.protectedFiles, () => deps.runChild(plan, n)) : deps.runChild(plan, n);
+      // 盘上改动快照 (2026-09-06, writeset/disk-delta): 派发前拍一次, 回来再拍一次, 差集并进写集对账 ——
+      // worker 经 shell 改的文件不进 filesTouched, 只靠工具上报会把声明文件全记成 missing (pathfix 臂 17/80)。
+      const diskBefore = snapshotDisk(deps.ctx.cwd);
+      if (diskBefore.why) logger.info({ seq: n, why: diskBefore.why }, '[orchestrating-loop] 盘上快照没拍成 (派发前) → 写集对账只靠工具上报');
       try {
         exec = await guarded();
       } catch (err) {
@@ -536,8 +542,20 @@ function adaptCard(card: ConductorTool, deps: ConductorRuntimeDeps, nextSeq: () 
       if (ledger) {
         ledger.ok++;
         ledger.byCard[card.name as ConductorCardName] = (ledger.byCard[card.name as ConductorCardName] ?? 0) + 1;
-        const facts = computeLoopDispatchFacts(plan, exec, deps.ctx.cwd);
-        ledger.dispatches.push({ ...dispatch, failed: Object.values(exec.results).filter((r) => r.status !== 'done').length, ...facts });
+        const diskAfter = snapshotDisk(deps.ctx.cwd);
+        const snapped = !diskBefore.why && !diskAfter.why;
+        const disk = snapped ? diskDelta(diskBefore.files, diskAfter.files) : [];
+        if (diskAfter.why) logger.info({ seq: n, why: diskAfter.why }, '[orchestrating-loop] 盘上快照没拍成 (派发后) → 写集对账只靠工具上报');
+        const facts = computeLoopDispatchFacts(plan, exec, deps.ctx.cwd, disk);
+        const toolReported = new Set(
+          Object.values(exec.results).flatMap((r) => (r.filesTouched ?? []).map((f) => repoRelativePath(r.artifactRoot ?? deps.ctx.cwd, f))),
+        );
+        ledger.dispatches.push({
+          ...dispatch,
+          failed: Object.values(exec.results).filter((r) => r.status !== 'done').length,
+          ...facts,
+          ...(snapped ? { diskTouched: disk.filter((f) => !toolReported.has(f)).length } : {}),
+        });
       }
       const summary = summarizeChildRun(exec, label);
       const failed = Object.values(exec.results).filter((r) => r.status !== 'done').map((r) => r.id);

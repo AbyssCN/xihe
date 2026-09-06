@@ -49,6 +49,11 @@ export interface LoopDispatch {
    * 固化进子节点。
    */
   handoffChars?: number;
+  /**
+   * 盘上差集里**写工具没报**的文件数 (2026-09-06): worker 经 shell 改的那部分。缺席 = 没拍快照 (非 git 仓 / git 失败,
+   * 原因在日志); 0 = 拍了, 工具上报与盘上一致。NULL ≠ 0 (仓规坑 ①)。
+   */
+  diskTouched?: number;
 }
 
 /**
@@ -95,6 +100,12 @@ export function computeLoopDispatchFacts(
    * 假 orphan / 假 missing → 判官「产物不存在」。
    */
   root?: string,
+  /**
+   * 盘上真实改动 (2026-09-06, writeset/disk-delta): 派发前后快照差集, 已是相对仓根路径。
+   * 并进 touched 再对账 —— worker 经 shell 改的文件不经写工具, 只靠 `filesTouched` 会全记成 missing。
+   * 缺席 = 没拍快照 (老调用零改动)。
+   */
+  diskTouched?: readonly string[],
 ): { filesTouched: string[]; done: number; writeSet: { declared: string[]; orphan: string[]; missing: string[] } | null } {
   const filesTouched: string[] = [];
   const seenTouched = new Set<string>();
@@ -108,6 +119,12 @@ export function computeLoopDispatchFacts(
       seenTouched.add(f);
       filesTouched.push(f);
     }
+  }
+  for (const raw of diskTouched ?? []) {
+    const f = repoRelativePath(root, raw);
+    if (seenTouched.has(f)) continue;
+    seenTouched.add(f);
+    filesTouched.push(f);
   }
   const declared: string[] = [];
   const seenDeclared = new Set<string>();
