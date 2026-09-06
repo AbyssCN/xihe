@@ -360,14 +360,19 @@ export function checkCriterionFreeze(freeze: CriterionFreeze, root: string): str
     .map(([f]) => f);
 }
 
-/** 给 verifier 的判卷真值一行 (D-5 注入面): 没冻过 → null (不编)。hash 是**判卷时刻**重算后对照冻结值的结论。 */
-export function renderCriterionFreezeTruth(freeze: CriterionFreeze, root: string): string | null {
+/**
+ * 给 verifier 的判卷真值一行 (D-5 注入面): 没冻过 → null (不编)。hash 是**判卷时刻**重算后对照冻结值的结论。
+ *
+ * @param authorModel R4 (2026-09-06): 判据由**异族座**写出时的座位坐标 —— 有则多印一格「作者=异族座 X」,
+ *   让终审知道这份判据不是执行侧写的 (1-B 否决判据时这条要一起出现)。缺席 = 执行侧自写 (今天的路径), 不印。
+ */
+export function renderCriterionFreezeTruth(freeze: CriterionFreeze, root: string, authorModel?: string): string | null {
   if (freeze.frozenAtDispatch === undefined || !freeze.hashes) return null;
   const tampered = checkCriterionFreeze(freeze, root);
   const parts = Object.entries(freeze.hashes).map(([f, h]) =>
     h === null ? `${f} (派发后仍不存在)` : `${f} (${h}, 判卷时${tampered.includes(f) ? '已变' : '未变'})`,
   );
-  return `派发 #${freeze.frozenAtDispatch} 单独产出并冻结: ${parts.join(' · ')}`;
+  return `派发 #${freeze.frozenAtDispatch} 单独产出并冻结: ${parts.join(' · ')}${authorModel ? ` · 作者=异族座 ${authorModel}` : ''}`;
 }
 
 export function createConductorRuntimeTools(deps: ConductorRuntimeDeps): AnyOmdTool[] {

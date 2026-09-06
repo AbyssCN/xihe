@@ -24,6 +24,11 @@ export interface ConductorFacts {
   acceptance?: { command: string; expect_exit: number };
   /** 1-A (2026-09-03): 判据命令引用、run 开始时**不存在**的文件 (相对写根)。非空 → 第 1 个派发只准产出它们, 引擎随后冻结。 */
   criterionFiles?: readonly string[];
+  /**
+   * R4 (2026-09-06): 判据文件**已由异族座写出并冻结** (相对写根)。与 {@link criterionFiles} 互斥 ——
+   * 前者说"还缺, 你自己写", 后者说"已经有了, 你只能让它过"。两个都缺席 = 判据指向既有文件 (那一行不出现)。
+   */
+  criterionAuthored?: readonly string[];
   minutesLeft: number | null;
   tokensLeft: number | null;
   maxFanout: number;
@@ -130,9 +135,12 @@ export function renderConductorFacts(f: ConductorFacts): string {
     // 2026-09-05 (只留边界): 措辞不再规定第一发做什么 —— 先勘察还是先写判据由 conductor 定, 引擎只说边界。
     f.acceptance
       ? `- Acceptance command: \`${f.acceptance.command}\`, expected exit ${f.acceptance.expect_exit}. Workers run it with run_acceptance().` +
-        (f.criterionFiles && f.criterionFiles.length
-          ? ` Missing now: ${f.criterionFiles.join(', ')} — frozen (hashed) once written; later edits to them are blocked. Explore or write them first, your call.`
-          : '')
+        // R4 (2026-09-06): 判据已由异族座写出时换一句 —— 出题人已经出完题了, 这里说的是边界不是做法。
+        (f.criterionAuthored && f.criterionAuthored.length
+          ? ` Already written and frozen by a cross-family seat before this run started: ${f.criterionAuthored.join(', ')} — you can only make them pass; edits to them are blocked.`
+          : f.criterionFiles && f.criterionFiles.length
+            ? ` Missing now: ${f.criterionFiles.join(', ')} — frozen (hashed) once written; later edits to them are blocked. Explore or write them first, your call.`
+            : '')
       : '- Acceptance command: none. The verifier decides.',
     `- Work root: ${f.writeRoot.replace(/\\/g, '/')}. Protected paths: ${f.protectedPaths && f.protectedPaths.length ? f.protectedPaths.join(', ') : 'none declared'}.`,
     `- Budget: ${f.minutesLeft === null ? 'no minute budget' : `${f.minutesLeft} minutes`}, ${f.tokensLeft === null ? 'no token budget' : `${f.tokensLeft} tokens`}. Concurrency cap: ${f.maxFanout} workers at once.`,

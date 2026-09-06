@@ -166,6 +166,10 @@ export const KNOWN_UNATTRIBUTABLE: ReadonlySet<string> = new Set([
   'best-of-n:gen',
   'best-of-n:judge',
   'research:author-spec', // research/author-spec.ts:111, 模型 = conductorModel 但可被 input 覆盖
+  // R4 (2026-09-06) 异族座出题 (goal/criterion-author.ts)。**核过, 归不了**: 坐标是
+  // `crossFamilyModel(conductorModel)` —— 与 conductor 异族的**第一个**可解析座位, 可能是
+  // verifier 座也可能是 escalation 座, 逐 run 逐配置不同。编一个座位归进去就是错归。
+  'goal:criterion-author',
   'model-call', // gateway 的兜底标签(调用方没给 role)
   // ⚠ 'model-call' 在本账本里**永远不会出现**: gateway.ts:95 那个兜底名只喂 Langfuse,
   // seat-usage 走的是 `role ?? null`。留着是为了「核过」这层语义, 别当它是活标签。

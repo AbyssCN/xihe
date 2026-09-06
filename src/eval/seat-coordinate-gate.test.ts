@@ -116,6 +116,11 @@ const NOISE_PROVIDERS: ReadonlySet<string> = new Set([
   // 重画前置批评步的**角色标签** (dag/thinker.ts)。真坐标: 默认档 = 调用方 conductorModel,
   // 升档 = SEAT_PREFERRED_COORD['verifier'] (座位链), 一个字面坐标都没写。
   'thinker',
+  // R4 (2026-09-06): 异族座出题的**角色标签** `goal:criterion-author` (goal/run-goal.ts 的
+  // productionCriterionAuthor) —— 与 web:* / judge:* / thinker:* 同族: 是观测面的 traceName,
+  // 不是模型坐标。真坐标由 criterion-author.ts 的 `crossFamilyModel()` 走座位链解析
+  // (verifier 座优先, escalation 座次之), 一个字面坐标都没写。
+  'goal',
 ]);
 
 /**

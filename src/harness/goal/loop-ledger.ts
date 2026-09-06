@@ -23,6 +23,7 @@ import type { CriterionSurveyFacts } from './criterion-survey';
 import type { CriterionConsensus } from './criterion-consensus';
 import type { ImpactPackFacts } from './impact-pack';
 import type { RunnerReady } from './runner-ready';
+import type { CriterionAuthorResult } from './criterion-author';
 
 export interface LoopDispatch {
   seq: number;
@@ -149,6 +150,8 @@ export function computeLoopDispatchFacts(
  * (引擎记下 hash), 之后任何派发改它们都会被工具闸拒 (agent-tools withProtectedPaths); 先勘察还是先写判据由 conductor 定。
  * 三态: 整格缺席 = 判据不引用未存在文件 (不适用); `frozenAtDispatch` 缺席 = 还没有哪一发把它们写出来;
  * `hashes[f] === null` = 冻结那一刻该文件仍不存在 (不受保护); `tampered` 缺席 = 没核过, `[]` = 核过全同。
+ * R4 (2026-09-06): `frozenAtDispatch === 0` = **任何派发之前**就冻上了 —— 异族座先写的判据 (见 `./criterion-author`)。
+ * 0 与缺席别压平 (§静默坑 1): 前者是「冻在第 0 发」, 后者是「还没冻住」。
  */
 export interface CriterionFreeze {
   files: string[];
@@ -174,6 +177,8 @@ export interface ConductorCardLedger {
   criterionFreeze?: CriterionFreeze;
   /** #205 方向性探针结论 (冻结点写入; 语义见 LoopLedger.criterionDirection)。 */
   criterionDirection?: 'red-before' | 'green-before' | 'inconclusive';
+  /** R4 异族先写判据的读数 (装配前写一次; 语义见 {@link LoopLedger.criterionAuthor})。 */
+  criterionAuthor?: CriterionAuthorResult;
   /** W1 勘察包读数 (装配期写一次; 语义见 {@link LoopLedger.surveyPack})。 */
   surveyPack?: SurveyPackFacts;
 }
@@ -342,7 +347,18 @@ export interface LoopLedger {
    */
   runnerReady?: RunnerReady;
 
-  cards: Omit<ConductorCardLedger, 'dispatches' | 'residentPromptChars' | 'criterionFreeze' | 'criterionDirection'>;
+  /**
+   * R4 异族先写判据的读数 (2026-09-06, 见 `./criterion-author`)。
+   *
+   * 挂这里的理由同上面几格: 只有 `r.loop` 整份 JSON 出得了 bench 容器。
+   * ⚠ 三态别压平 (§静默坑 1): 整格缺席 = **开关没开** (`OMD_CRITERION_AUTHOR` 不是 `cross` /
+   * 判据不引用未存在文件 / 走的不是循环路径); `attempted: false` = 开了但一发模型都没打
+   * (没有异族座); `attempted: true, accepted: false` = 打了没采纳, 为什么在 `why`。
+   * 契约预注册要收的正是「`accepted` 率」与「accepted 题 vs 未 accepted 题的 reward」这一对。
+   */
+  criterionAuthor?: CriterionAuthorResult;
+
+  cards: Omit<ConductorCardLedger, 'dispatches' | 'residentPromptChars' | 'criterionFreeze' | 'criterionDirection' | 'criterionAuthor'>;
   dispatches: LoopDispatch[];
   /** 1-A 冻结台账 (收尾时 `tampered` 已核)。缺席 = 判据不引用未存在文件。 */
   criterionFreeze?: CriterionFreeze;

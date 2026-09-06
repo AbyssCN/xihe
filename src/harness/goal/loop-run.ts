@@ -98,6 +98,24 @@ export function conductorCtxOf(host: LoopHost, runnable: LoopRunnable): Conducto
  * (子图节点各自带 self_check; 终审只在父 run 打一次), continuity 派生 runId `<runId>:d<n>` (子节点 checkpoint
  * 与父 run 不撞; `onComplete` / `onNodeEvent` 保留 —— 留痕库按 run_id 归组, 一次派发一行, 进度事件照发)。
  */
+/** conductor 节点的 goal (勘察包与面共用同一份取法; 节点缺席 → 任务原文)。 */
+export function conductorGoalOf(plan: ConductorPlan, task: string): string {
+  return plan.nodes[conductorNodeIdOf(plan)]?.goal ?? task;
+}
+
+/**
+ * W1 勘察包 —— **全仓只此一处算**。
+ * fail-open (④ 告知层): 算不出来只是少一段事实, 绝不许挡住点火 —— 但不吞证据 (§静默坑 2)。
+ */
+export function buildLoopSurveyPack(conductorGoal: string, cwd: string): SurveyPack | undefined {
+  try {
+    return buildSurveyPack(conductorGoal, cwd);
+  } catch (err) {
+    logger.warn({ cwd, err: String(err).slice(0, 200) }, '[loop-run] W1 勘察包算不出来 → 这趟没有包 (照跑)');
+    return undefined;
+  }
+}
+
 export function withLoopConfig(
   base: ExecutorDagConfig,
   plan: ConductorPlan,
@@ -106,6 +124,12 @@ export function withLoopConfig(
   task: string,
   /** R-1 账本; 回灌第二跑传同一个对象 (两跑合并计数)。 */
   ledger?: ConductorCardLedger,
+  /**
+   * W1 勘察包 —— **算好的那一份**。run-goal 在异族座出题 (R4) 之前就要拿它当输入,
+   * 所以那条路上算一次传进来, 这里不再算第二遍 (同一份包两处算 = 两次全仓扫描, 且两份还可能不同)。
+   * 缺席 = 没人先算过 (`run` 入口 / 测试) ⇒ 这里自己算, 逐字节同旧。
+   */
+  preSurveyPack?: SurveyPack,
 ): ExecutorDagConfig {
   const ctx = conductorCtxOf(host, runnable);
   const { verifier: _v, maxEscalations: _m, leafFace: _f, freezeCriterion: _c, frozenNodes: _n, deterministicReplan: _d, ...childBase } = base;
@@ -147,6 +171,10 @@ export function withLoopConfig(
   // 关掉时连 ledger 恢复那条也要断: 否则回灌第二跑会从 `ledger.criterionFreeze` 把保护捡回来,
   // 逃生口就只关了一半 (那种"关了但没全关"的旋钮比没有旋钮更坏 —— 读数会归错因)。
   const freezeFiles = freezeOff ? [] : criterionFiles.length ? criterionFiles : ledger?.criterionFreeze?.files ?? [];
+  // R4 (2026-09-06): 判据已由异族座写出并冻结 ⇒ 判据文件此刻**存在**, 于是 `criterionFiles` 天然为空,
+  // 面上那句「Missing now」不再成立。换成边界那一句 (D-5): 你只能让它过。
+  // 逃生口 `OMD_CRITERION_FREEZE=0` 关掉冻结时也不印 —— 没冻就没有"改不动"这回事。
+  const authoredFiles = !freezeOff && ledger?.criterionAuthor?.accepted ? ledger.criterionAuthor.files ?? [] : [];
   const conductorId = conductorNodeIdOf(plan);
   // 2026-09-04:三份名册进 ConductorFacts(与 ctx.registries 同源,不重复扫盘)。空数组也传(undefined 时
   // 渲染行不出现,但传过去 [] 不会让 conductor 误以为「没注册」)。
@@ -154,13 +182,8 @@ export function withLoopConfig(
   // W1 (2026-09-06): 勘察包**算一次**, conductor 面与每个 work 子节点共用同一份 (见 ./survey-pack)。
   // 治的读数: 每题 36-44 次 LLM 调用里, conductor 约 23 步在读仓、work 子节点又有 47% 的步在重读同一批东西。
   // fail-open (④ 告知层): 算不出来只是少一段事实, 绝不许挡住点火 —— 但不吞证据 (§静默坑 2)。
-  const conductorGoal = plan.nodes[conductorId]?.goal ?? task;
-  let surveyPack: SurveyPack | undefined;
-  try {
-    surveyPack = buildSurveyPack(conductorGoal, host.cwd);
-  } catch (err) {
-    logger.warn({ cwd: host.cwd, err: String(err).slice(0, 200) }, '[loop-run] W1 勘察包算不出来 → 这趟没有包 (照跑)');
-  }
+  const conductorGoal = conductorGoalOf(plan, task);
+  const surveyPack = preSurveyPack ?? buildLoopSurveyPack(conductorGoal, host.cwd);
   // 读数进运行期账本 (回灌第二跑会覆盖为那一跑的值 —— 两跑各自算各自的包)。
   if (ledger && surveyPack) {
     // 影响包读数一并提上来 (R2, 2026-09-06): 缺席 = 没算那一段, 与「算了没命中」是两件事 (§静默坑 1)。
@@ -178,6 +201,7 @@ export function withLoopConfig(
       protectedPaths: extractProtectedPaths(task),
       ...(ctx.acceptance ? { acceptance: ctx.acceptance } : {}),
       ...(criterionFiles.length ? { criterionFiles } : {}),
+      ...(authoredFiles.length ? { criterionAuthored: authoredFiles } : {}),
       minutesLeft: budgetMs !== undefined ? Math.max(0, Math.floor(budgetMs / 60_000)) : null,
       tokensLeft: base.loopBudget?.tokens ?? null,
       maxFanout: ctx.maxFanout,

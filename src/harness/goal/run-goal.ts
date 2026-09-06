@@ -44,6 +44,7 @@ import {
   acceptanceVacuityReason,
   checklistDiscriminationReason,
   isPytestHarnessInconclusive,
+  missingPathArgs,
   type ProbeItemOutcome,
 } from './acceptance-gate';
 // P2b-runtime (2026-09-02): 冻结判据 harness-inconclusive 的运行尾巴要落进人读的 receipt,
@@ -88,6 +89,7 @@ import { escalationProviderReady, type VerdictTarget, type VerifierFn } from '..
 import { extractProtectedPaths } from './goal-protections';
 import { TERMINAL_ZERO_WRITE, zeroWriteVerdict, type ZeroWriteInput } from './zero-write-gate';
 import { withProtectedPaths } from '../agent-tools';
+import { hashArtifact } from '../continuity/checkpoint-manager';
 import { compilePlaybook } from '../playbook/compile';
 import { loadPlaybookForGoal } from './playbook-direct';
 import {
@@ -117,7 +119,8 @@ import {
 } from './falsify-tests';
 import { resolveRoleModel, send } from '../../model/gateway';
 import { surveyForCriterion, type CriterionSurvey } from './criterion-survey';
-import { conductorCtxOf, withLoopConfig, type LoopHost } from './loop-run';
+import { buildLoopSurveyPack, conductorCtxOf, conductorGoalOf, withLoopConfig, type LoopHost } from './loop-run';
+import { authorCriterionCrossFamily, type CriterionAuthorResult } from './criterion-author';
 
 // D-I: 两条轴的类型与分类器都归 ./acceptance (那里是判据轴的单一真源); 此处 re-export 保旧调用面。
 export type { AcceptanceSpec, GoalClassification, GoalTier } from './classify-acceptance';
@@ -350,6 +353,22 @@ export interface RunGoalConfig {
      */
     _settleRubric?: typeof settleRubricDefault;
   };
+  /**
+   * **异族座出题者** (R4, 2026-09-06 `docs/plan/2026-09-06-异族先写判据-执行契约.md` D-2)。
+   * 开关 `OMD_CRITERION_AUTHOR=cross` 开着、且判据引用的文件此刻不存在时被调**恰一次**。
+   *
+   * 不给 = 走生产默认 (`./criterion-author` 的 `authorCriterionCrossFamily`, 模型走 `config.dag.generate`)。
+   * 测试注入这一口是为了把「模型说了什么」与「探针判了什么」变成单变量 —— 出题人与探针都不许是真的随机源。
+   */
+  _authorCriterion?: (input: {
+    goal: string;
+    command: string;
+    expectExit: number;
+    missingFiles: string[];
+    root: string;
+    surveyText: string;
+    conductorModel: string;
+  }) => Promise<CriterionAuthorResult>;
   /**
    * **判据重建者** (INV-4, 2026-08-29 否决边契约 D-4)。触发条件成立时被调**至多一次**,
    * 返回一条候选判据命令 (返回 `null` = 提不出来, 照实记, 不编)。
@@ -785,6 +804,21 @@ function productionCriterionRebuilder(
     const command = r.text.trim().split('\n').map((l) => l.trim()).filter(Boolean).at(-1) ?? '';
     return command ? { command } : null;
   };
+}
+
+/**
+ * R4 生产出题者: 异族座**一发纯文本**, 无工具 —— 出题人不许碰仓, 它写的每个字节都要过
+ * `parseAuthoredFiles` 的形状闸再写入磁盘。没有 `generate` (装配没接注入口) ⇒ 缺席, 走今天那条路。
+ */
+function productionCriterionAuthor(config: RunGoalConfig): RunGoalConfig['_authorCriterion'] | undefined {
+  const generate = config.dag.generate;
+  if (!generate) return undefined;
+  return (input) =>
+    authorCriterionCrossFamily({
+      ...input,
+      generate: async ({ model, prompt }) => (await generate({ messages: [{ role: 'user', content: prompt }], model, traceName: 'goal:criterion-author' })).text,
+      ...(config.dag.commandRunner ? { runCommand: config.dag.commandRunner } : {}),
+    });
 }
 
 function productionDesignReviewRunner(
@@ -2047,7 +2081,10 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
     if (falsifyOn && loopPlan !== undefined && falsify === undefined) await runFalsifyRound();
     // 1-A: 判据文件冻结的引擎记录随卷 (D-5 按调用真值): 判卷时刻重算 hash 对照冻结值, 判卷官据此不再把
     // 「测试文件是本 run 写的」读成 target=criterion。没冻过 → 不注入, 卷面同旧。
-    const freezeTruth = loopLedger.criterionFreeze ? renderCriterionFreezeTruth(loopLedger.criterionFreeze, config.cwd) : null;
+    // R4 (D-6): 判据是异族座写的就多印一格「作者=异族座 X」 —— 1-B 否决判据时这条要一起出现,
+    // 否则终审只能按"判据是执行体自己出的题"那套读它。没采纳 ⇒ 不印 (今天的路径, 卷面同旧)。
+    const criterionAuthorModel = loopLedger.criterionAuthor?.accepted ? loopLedger.criterionAuthor.model : undefined;
+    const freezeTruth = loopLedger.criterionFreeze ? renderCriterionFreezeTruth(loopLedger.criterionFreeze, config.cwd, criterionAuthorModel) : null;
     const withFreeze = freezeTruth ? { ...req, truths: { ...(req.truths ?? {}), criterionFreeze: freezeTruth } } : req;
     // D-2 (2026-09-04): 派发子图机械记录 (filesTouched / done / 写集对账 / 盘上存在 / git 状态) 随卷, 与 loop-run 同一跳。dispatches 空 → 同一个 req, 卷面同旧。
     const verdict = await inner(withDispatchEvidence(withFreeze, loopLedger.dispatches, { cwd: config.cwd }));
@@ -2069,6 +2106,51 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
     }
     return verdict;
   };
+  // ── R4 异族座先写判据 (契约 `docs/plan/2026-09-06-异族先写判据-执行契约.md`) ────────────
+  //
+  // 治的病: 1-A 只留边界之后判据文件由**执行侧首次写出** —— 在会局部修的座位上等于让考生自己出题
+  // (R2 现场: gold 改 2 文件, M3 只改 1 个, 自写判据去测辅助函数, 引擎判它成)。断言内容是任何
+  // 机械闸都够不到的地方, 所以治法是**换出题人**, 不是再加一道闸。
+  //
+  // 位置: 分类定稿之后 (判据已知)、装配 conductor 面之前 (它要拿到"已经写好了"这句话)。
+  // W1 勘察包在这里算一次: 出题人要它当输入, 装配面也要它 —— 同一份传下去, 不算两遍。
+  const loopSurveyPack = loopPlan !== undefined ? buildLoopSurveyPack(conductorGoalOf(loopPlan, task), config.cwd) : undefined;
+  // D-9 开关: 默认关 (先当单变量臂)。⚠ 只有显式 `cross` 才开, 其余取值 (含缺席/空串/'1') 一律照旧,
+  // 存量行为逐字节不变 —— 那是对照臂能成立的前提。
+  if (loopPlan !== undefined && runnable && process.env.OMD_CRITERION_AUTHOR?.trim() === 'cross') {
+    // D-1: 只对**不存在**的判据文件。指向既有测试的判据不动 (那一类 reward 最高)。
+    const missingFiles = missingPathArgs(runnable.command, config.cwd);
+    const author = missingFiles.length ? config._authorCriterion ?? productionCriterionAuthor(config) : undefined;
+    if (missingFiles.length && !author) {
+      logger.info({ missingFiles }, '[run-goal] R4 开关开着但没有出题者 (装配没接 generate) → 判据仍由执行侧自写');
+    }
+    if (author) {
+      try {
+        loopLedger.criterionAuthor = await author({
+          goal,
+          command: runnable.command,
+          expectExit: runnable.expectExit ?? 0,
+          missingFiles,
+          root: config.cwd,
+          surveyText: loopSurveyPack?.text ?? '',
+          conductorModel: config.dag.conductorModel,
+        });
+      } catch (err) {
+        // fail-open: 换出题人是一次尝试, 不是前置条件 —— 它坏了就退回今天的路径 (§静默坑 2: 不吞证据)。
+        logger.warn({ err: String(err) }, '[run-goal] R4 异族出题者抛错 → 退回执行侧自写 (读数记 attempted)');
+        loopLedger.criterionAuthor = { attempted: true, accepted: false, why: `出题者抛错: ${String(err).slice(0, 240)}` };
+      }
+    }
+    const authored = loopLedger.criterionAuthor;
+    if (authored?.accepted && authored.files?.length) {
+      // D-5 冻结: `frozenAtDispatch: 0` = 任何派发之前就冻上了。`initFreezeState` 从 `hashes` 恢复
+      // 保护 (不是从 `frozenAtDispatch`), 于是**首发**的子 run 就在 withProtectedPaths 里跑。
+      const hashes: Record<string, string | null> = {};
+      for (const f of authored.files) hashes[f] = hashArtifact(join(config.cwd, f));
+      loopLedger.criterionFreeze = { files: [...authored.files], frozenAtDispatch: 0, hashes };
+      logger.info({ model: authored.model, hashes }, '[run-goal] R4 异族座判据已冻结 (frozenAtDispatch 0) → 执行侧只能让它过');
+    }
+  }
   let exec: ExecutorDagResult;
   /** P3 S6b: 循环路径第二跑 (D-14 回灌) 的 config 基座 = 第一跑的 execCfg (含 freezeCriterion.waiveRed 等), 不是裸 config.dag。 */
   let loopBase: ExecutorDagConfig = config.dag;
@@ -2109,7 +2191,7 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
     //   · 卡的 `runChild` = 同一个 `_runDag` 注入口跑派发出的子图 (D-5 唯一执行入口), 子 run 剥掉
     //     verifier / maxEscalations / leafFace / freezeCriterion (子图节点各自带 self_check), 派生 runId。
     //   平铺图那几颗钉子 (frozenNodes / deterministicReplan) 不挂: 循环没有重规划轮。
-    const loopCfg = loopPlan !== undefined ? withLoopConfig(tappedCfg, loopPlan, loopHost, runnable, task, loopLedger) : tappedCfg;
+    const loopCfg = loopPlan !== undefined ? withLoopConfig(tappedCfg, loopPlan, loopHost, runnable, task, loopLedger, loopSurveyPack) : tappedCfg;
     exec = await (config._runDag ?? runExecutorDagWithPlan)(execPlan, loopCfg);
   } catch (err) {
     return bail(`execute 抛错: ${String(err).slice(0, 200)}`, 'infra-error');
@@ -2171,6 +2253,8 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
       // 基座 = 第一跑的 execCfg (同一份 freezeCriterion / waiveRed / 预算), 只是 verifier 不在 ——
       // 引擎侧仍然只跑一次终审 (靠"字段不在"机械保证, 不靠计数)。第二跑的语义复审由下方
       // **run-goal 自己手动调一次**, 不经引擎、不经 tapVerifier: 这样"至多一次"是调用点数出来的。
+      // ⚠ 回灌第二跑**不复用**首跑那份勘察包: 那时 conductor 的 goal 已经追了 finding 原文,
+      // 包是按 goal 抽词算的 —— 复用等于拿首跑的问题去答第二跑的题。这里不传, 由 withLoopConfig 自己算 (行为同旧)。
       const { verifier: _noVerifier, ...noVerifierCfg } = withLoopConfig(loopBase, replanted, loopHost, runnable, task, loopLedger);
       void _noVerifier;
       dispatchesBeforeReinject = loopLedger.dispatches.length;
@@ -2430,6 +2514,9 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
       })
     : { rebuild: false, reason: '非可执行判据 — 没有"命令量不出差别"这回事' };
   if (runnable && rebuildTrigger.rebuild) {
+    // R4 D-7: 异族座出的题也被判死了 —— 重建照走 (重建者仍是执行体家族, 那是今天的行为),
+    // 但读侧要分得出这一格: 「异族出题 + 仍被否决」与「执行侧自写 + 被否决」是两种病。
+    if (loopLedger.criterionAuthor?.accepted) loopLedger.criterionAuthor.rebuiltAfterCross = true;
     // 声明产物集 = 图里节点声明会产出的东西。**给得出来就要给** —— 切片 1 那道门在拿不到
     // 这份事实时整道不跑 (缺席 ≠ 空集), 而重建判据恰恰最容易指向"还没被产出的文件"。
     const declaredArtifacts = [
@@ -2964,6 +3051,8 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
         ...(classified.criterionConsensus ? { criterionConsensus: classified.criterionConsensus } : {}),
         // W1 勘察包读数 (2026-09-06): 装配期写在 ConductorCardLedger 上, 这里提到 loop (同款分层)。缺席 = 没装配编排循环。
         ...(loopLedger.surveyPack ? { surveyPack: loopLedger.surveyPack } : {}),
+        // R4 异族先写判据读数 (2026-09-06): 同一条理由挂在 loop 上。缺席 = 开关没开 (三态见 LoopLedger.criterionAuthor)。
+        ...(loopLedger.criterionAuthor ? { criterionAuthor: loopLedger.criterionAuthor } : {}),
         // W3 runner 就绪预检 (2026-09-06): 同一条理由挂在 loop 上。恒写 —— 预检在这条路上一定跑过,
         // 「不适用」由 `runner: null` 表达, 不用缺席表达 (§静默坑 1)。
         runnerReady,

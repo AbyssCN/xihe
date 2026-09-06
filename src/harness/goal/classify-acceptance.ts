@@ -347,7 +347,7 @@ export function familyOf(coord: string): string {
  * 两个都同族 ⇒ **没有异族候选** —— 那时只采两份并记 `crossFamily=false`, 不拿同族凑第三份。
  * (同族自审复用同一个盲点, 凑出来的第三票是一张假票。)
  */
-function crossFamilyModel(coord: string): string | undefined {
+export function crossFamilyModel(coord: string): string | undefined {
   const family = familyOf(coord);
   for (const seat of ['verifier', 'escalation'] as const) {
     const m = tryResolveSeatModel(seat)?.model.trim();
