@@ -155,6 +155,23 @@ describe('INV-3 生成返回非 JSON 两次 ⇒ 空包 + why, 调用方不抛', 
   });
 });
 
+// ── 接口/惯例条数上限 (2026-09-07, spec 首批: 接口段顶满上限, 需求渲染 0 条) ─────────────
+describe('接口条数上限: 先丢 guess, 不把需求清单挤成 0', () => {
+  test('★ 30 条 guess 接口 + 5 条 repo 接口 + 20 条需求 ⇒ 接口 ≤ 12 且 repo 全留, 需求全留 (证伪: 去掉 MAX_INTERFACES ⇒ 红)', async () => {
+    const ifaces = [
+      ...Array.from({ length: 5 }, (_, i) => ({ name: `repo_${i}`, signature: 'x'.repeat(120), returns: 'y'.repeat(60), raises: '', source: 'repo' })),
+      ...Array.from({ length: 30 }, (_, i) => ({ name: `guess_${i}`, signature: 'x'.repeat(120), returns: 'y'.repeat(60), raises: '', source: 'guess' })),
+    ];
+    const reqs = Array.from({ length: 20 }, (_, i) => ({ text: `需求 ${i} ` + 'z'.repeat(40), source: 'inferred' }));
+    const body = JSON.stringify({ project: 'p', interfaces: ifaces, conventions: [], requirements: reqs });
+    const pack = await buildSpecPack('goal', '', { generate: async () => ({ text: body, usage: { in: 0, out: 0 } }) as never, samples: 1, maxChars: 6000 });
+    expect(pack.facts.interfaces).toBeLessThanOrEqual(12);
+    expect(pack.text.match(/`repo_\d+`/g)?.length).toBe(5);
+    expect(pack.facts.requirements).toBe(20);
+    expect(pack.why).toContain('先丢 guess');
+  });
+});
+
 // ── INV-6: 超上限按 requirements 尾部截 ──────────────────────────────────────
 
 describe('INV-6 渲染后总长 ≤ maxChars, 超出按需求尾部截并记 why', () => {

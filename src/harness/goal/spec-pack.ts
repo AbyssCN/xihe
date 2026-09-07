@@ -105,7 +105,15 @@ export interface SpecPackOpts {
 export const SPEC_PACK_HEADER = '## 规格包 (开跑前的上游对齐, 执行座自答; source 标出处, guess = 没有依据)';
 
 const DEFAULT_SAMPLES = 3;
-const DEFAULT_MAX_CHARS = 6000;
+const DEFAULT_MAX_CHARS = 9000;
+/**
+ * 接口 / 惯例两节的条数上限 (2026-09-07, code80-m3-spec 首批实测): M3 一份样本能吐 20+ 条接口、每条带长签名,
+ * 三份合并后光接口段就顶满 6000 字, 需求清单被 INV-6 尾部截成 0 条 (`渲染 0 条`) —— 枚举那一半整包蒸发。
+ * 先按出处排 (repo > upstream > guess: guess 是最没依据的那档, 先丢它), 再截条数, 最后才轮到需求尾部截。
+ * 证伪: 去掉这两个上限 ⇒ spec-pack.test.ts「30 条 guess 接口不把需求清单挤成 0」红。
+ */
+const MAX_INTERFACES = 12;
+const MAX_CONVENTIONS = 8;
 /** 平票时的出处优先级 (D-4): 仓里真有 > 对上游的记忆 > 没依据。 */
 const SOURCE_RANK: Record<SpecSource, number> = { repo: 3, upstream: 2, guess: 1 };
 /** 归一化去停用词表 —— 只挡「同一句话换个虚词」, 不做语义归并 (那需要模型, 而这里要的是确定性)。 */
@@ -389,7 +397,16 @@ export async function buildSpecPack(goal: string, surveyText: string, opts: Spec
     };
   }
 
-  const merged = mergeSpecSamples(got);
+  const fullMerged = mergeSpecSamples(got);
+  const rankedIfaces = [...fullMerged.interfaces].sort((a, b) => SOURCE_RANK[b.source] - SOURCE_RANK[a.source]); // 高分在前 (repo 3 > upstream 2 > guess 1)
+  const merged: MergedSpec = {
+    ...fullMerged,
+    interfaces: rankedIfaces.slice(0, MAX_INTERFACES),
+    conventions: fullMerged.conventions.slice(0, MAX_CONVENTIONS),
+  };
+  if (merged.interfaces.length < fullMerged.interfaces.length || merged.conventions.length < fullMerged.conventions.length) {
+    whys.push(`接口 ${fullMerged.interfaces.length}→${merged.interfaces.length} 条 / 惯例 ${fullMerged.conventions.length}→${merged.conventions.length} 条 (先丢 guess, 给需求清单留位)`);
+  }
   // INV-6: 超上限**按 requirements 尾部截** —— 接口名是这一包的主产物, 清单是可再生的那半。
   let kept = merged.requirements.length;
   let text = renderSpecPack(merged);
