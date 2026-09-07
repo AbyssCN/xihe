@@ -166,7 +166,12 @@ function snapshotBase(root: string, git: (args: string[], env?: Record<string, s
     }
     const tree = git(['write-tree'], env);
     if (tree === git(['rev-parse', 'HEAD^{tree}'])) return head;
-    return git(['commit-tree', tree, '-p', head, '-m', 'omd fanout snapshot (临时索引, 主索引未动)'], env);
+    // 身份钉死 (2026-09-07, bench 臂 code80-m3-fanout3b 实测 7/80 题建树失败, 拒因全是
+    // `commit-tree … exit 128: Author identity unknown`): 容器里没有 user.name/email, 而快照 commit
+    // 只是引擎自己的锚点, 与谁提交无关。只影响这一发, 不改仓配置。
+    // 证伪: 去掉 GIT_AUTHOR_NAME ⇒ fanout-impl.test.ts「commit-tree 带自带身份」红。
+    const identity = { GIT_AUTHOR_NAME: 'omd', GIT_AUTHOR_EMAIL: 'omd@localhost', GIT_COMMITTER_NAME: 'omd', GIT_COMMITTER_EMAIL: 'omd@localhost' };
+    return git(['commit-tree', tree, '-p', head, '-m', 'omd fanout snapshot (临时索引, 主索引未动)'], { ...env, ...identity });
   } finally {
     // 临时索引是本函数自己造的垃圾, 不论成不成都得删 (它在 tmpdir 里, 与仓无关)。
     rmSync(dir, { recursive: true, force: true });

@@ -318,11 +318,13 @@ describe('applyWinner —— 赢家 diff 打回主工作区', () => {
 
 describe('planFanoutWorktrees —— 带 exclude 的 git add 被拒时退回不带 exclude 再试 (INV-R5.1-4)', () => {
   /** 假 git: 只在 `add` 带 exclude pathspec 时失败, 其余全成。 */
-  function fakeGit(): { run: SpawnLike; calls: string[][] } {
+  function fakeGit(): { run: SpawnLike; calls: string[][]; envs: Record<string, string>[] } {
     const calls: string[][] = [];
+    const envs: Record<string, string>[] = [];
     const ok = (stdout: string): { exitCode: number; stdout: string; stderr: string } => ({ exitCode: 0, stdout, stderr: '' });
-    const run: SpawnLike = (args) => {
+    const run: SpawnLike = (args, opts) => {
       calls.push([...args]);
+      if (args[1] === 'commit-tree') envs.push((opts as { env?: Record<string, string> } | undefined)?.env ?? {});
       const a = args.slice(1); // 去掉首词 'git'
       if (a[0] === 'rev-parse') return ok(a[1] === 'HEAD' ? 'HEADSHA\n' : 'HEADTREESHA\n');
       if (a[0] === 'add') {
@@ -334,8 +336,23 @@ describe('planFanoutWorktrees —— 带 exclude 的 git add 被拒时退回不�
       if (a[0] === 'commit-tree') return ok('BASESHA\n');
       return ok('');
     };
-    return { run, calls };
+    return { run, calls, envs };
   }
+
+  test('★ commit-tree 带自带身份 (bench 容器无 user.name ⇒ Author identity unknown, fanout3b 7/80 题零扇出; 证伪: 去掉 identity ⇒ 红)', () => {
+    const g = fakeGit();
+    const root = mkdtempSync(join(tmpdir(), 'omd-fanout-identity-'));
+    try {
+      planFanoutWorktrees(root, 2, { run: g.run, stamp: "id" });
+    } catch {
+      // 假 git 下 worktree add 可能走不到底; 这里只看 commit-tree 那一发的 env
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    expect(g.envs.length).toBeGreaterThan(0);
+    expect(g.envs[0]?.GIT_AUTHOR_NAME).toBe('omd');
+    expect(g.envs[0]?.GIT_COMMITTER_EMAIL).toBe('omd@localhost');
+  });
 
   test('★ 带 exclude 的 add 失败 ⇒ 不带 exclude 再试一次, 树照建成, 并 warn 一条带 git 原文 (证伪: 去掉退回那一跳 ⇒ 本条抛错红)', () => {
     const root = mkdtempSync(join(tmpdir(), 'omd-fanout-fakegit-'));
