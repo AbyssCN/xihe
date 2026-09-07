@@ -129,6 +129,11 @@ const TRACE_SEAT_RULES: readonly [RegExp, string][] = [
   // engine.ts settle() 的节点级行。**只有 agent 一种** —— 别的 kind 都经网关, 已有发级行,
   // 再记一条会把同一份 in/out 计两遍 (判据写在 settle 里那段注)。
   [/^agent-leaf$/, 'agent'],
+  // R7 (2026-09-07) 规格包那一发 (goal/run-goal.ts 的 specPackEnabled 段)。**归得了座**:
+  // 坐标写死是 `config.dag.agentLeafModel ?? config.dag.leafModel`, 也就是装配层解析出来的
+  // 执行座 —— 与 `goal:criterion-author` 那条**刚好相反** (那个是 crossFamilyModel 逐 run 变,
+  // 所以进 KNOWN_UNATTRIBUTABLE)。标签另起是为了在 byTrace 上数得出「开跑前对齐烧了多少」。
+  [/^goal:spec-pack$/, 'agent'],
   [/^omd-leaf$/, 'leaf'], // dag/defaults.ts:31 缺 traceName 时的兜底标签
   // research fanout 的分 stage 标签 (2026-08-14 加, 见 research/fanout.ts 的 CallFn.stage)。
   // **stage 才是原始观测**, 座位只是往上归一层 —— 想问「那 8M 花在哪」要看 byTrace 不是 bySeat。

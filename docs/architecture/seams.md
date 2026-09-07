@@ -36,7 +36,7 @@
 
 | 字段 | 必填 | 类型 | 一句话 | 消费方 (前3) |
 |---|---|---|---|---|
-| `generate` |  | `GenerateFn` | 注入式模型调用 (inproc leaf, 默认 callModel)。 | `src/harness/dag/engine.ts`<br>`src/harness/goal/run-goal.ts`<br>`src/harness/goal/classify-acceptance.ts` (8 文件) |
+| `generate` |  | `GenerateFn` | 注入式模型调用 (inproc leaf, 默认 callModel)。 | `src/harness/dag/engine.ts`<br>`src/harness/goal/run-goal.ts`<br>`src/harness/goal/classify-acceptance.ts` (9 文件) |
 | `agentRunner` |  | `AgentLeafRunner` | agent-kind leaf 的执行器 (带工具子 agent, 能改文件)。 | `src/mcp/assemble.ts`<br>`src/harness/dag/engine.ts`<br>`src/harness/goal/run-goal.ts` (7 文件) |
 | `commandRunner` |  | `CommandLeafRunner` | command-kind leaf 的执行器 (确定性 CLI, 零 LLM, 方案 A)。 | `src/harness/goal/run-goal.ts`<br>`src/mcp/assemble.ts`<br>`src/harness/dag/engine.ts` (8 文件) |
 | `forRoot` |  | `(root: string) => Pick<ExecutorDagConfig, 'agentRunner' \|…` | **换根时重建这两只手** (R5.1, 2026-09-07, 契约 `docs/plan/2026-09-06-并行实装扇出-执行契约.md` D-R5.1-2)。 | `src/mcp/assemble.ts`<br>`src/harness/goal/loop-run.ts` (2 文件) |

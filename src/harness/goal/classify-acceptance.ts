@@ -49,6 +49,7 @@ import {
   surveyHits,
 } from './criterion-consensus';
 import { unionCriterionCommands, type ConsensusWithUnion } from './criterion-union';
+import { SPEC_PACK_HEADER } from './spec-pack';
 import { tryResolveSeatModel } from '../../model/role-models';
 import { effectiveSeatSampling } from '../../model/seat-overrides';
 
@@ -469,6 +470,16 @@ export function classifyPrompt(goal: string, probe?: ClassifyPromptProbe): strin
           'README / docs 里写明的输出格式、键名、命令行参数、文件名, 是判据必须核的契约:',
           '执行型就指向或新写断言这些键的测试; rubric 就把它们逐条列进 checklist。',
           '既有测试与文档都没覆盖时才新写测试文件, 并在判据命令里写明文件名。',
+          // R7 D-6 (2026-09-07): **只在规格包在场时**加这一句 —— 缺席时这一段逐字节同旧
+          // (单变量臂的前提)。为什么只是措辞不是闸: 接口名对不对没有机械 oracle, 而一条
+          // 判不了真假的闸比没有闸更坏 (它会让人以为这件事被管住了)。
+          ...(probe.survey.includes(SPEC_PACK_HEADER)
+            ? [
+                '⚠ 上面「规格包」那一段列了这次要动的接口在**上游**叫什么。判据引用的符号名',
+                '  (函数 / 类 / 方法 / 输出字典的键) **以那一节为准**, 别用自己顺手起的名字 ——',
+                '  隐藏的验收测的是上游那些名字, 名字对不上, 行为写对了也一条都过不了。',
+              ]
+            : []),
         ].join('\n')
       : '';
   return [

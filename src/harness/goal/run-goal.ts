@@ -121,6 +121,7 @@ import { resolveRoleModel, send } from '../../model/gateway';
 import { surveyForCriterion, type CriterionSurvey } from './criterion-survey';
 import { buildLoopSurveyPack, conductorCtxOf, conductorGoalOf, withLoopConfig, type LoopHost } from './loop-run';
 import { authorCriterionCrossFamily, type CriterionAuthorResult } from './criterion-author';
+import { buildSpecPack, specPackEnabled, type SpecPack } from './spec-pack';
 
 // D-I: 两条轴的类型与分类器都归 ./acceptance (那里是判据轴的单一真源); 此处 re-export 保旧调用面。
 export type { AcceptanceSpec, GoalClassification, GoalTier } from './classify-acceptance';
@@ -1600,10 +1601,16 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   logger.info({ ...runnerReady, root: config.cwd }, '[run-goal] W3 runner 就绪预检 (installed 缺席 = 没试过装, false = 试了没成)');
   let survey: CriterionSurvey | undefined;
   let surveyError: string | undefined;
+  /**
+   * R7 规格包 (契约 `docs/plan/2026-09-07-规格包-上游对齐与需求枚举-执行契约.md`)。
+   * 缺席 = 开关没开 / 走的不是真分类那条路 (注入式 `_classify` / 闸 C 复用) —— 与
+   * 「算了但一份采样都没成」(在场且 `samples: 0`) 是两件事 (§静默坑 1)。
+   */
+  let specPack: SpecPack | undefined;
   const classified = prior
     ? prior.classified
     : await (config._classify ??
-      ((g: string) => {
+      (async (g: string) => {
         try {
           survey = surveyForCriterion(g, config.cwd);
         } catch (e) {
@@ -1611,6 +1618,28 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
           surveyError = String(e);
           logger.warn({ err: surveyError, root: config.cwd }, '[omd/goal] 分类前勘察失败 → 本次不带仓内契约线索');
         }
+        // ── R7 规格包: 动手前的上游对齐 + 需求枚举 (D-1 / D-2) ───────────────────
+        //
+        // 位置在**分类之前**是硬要求, 不是顺手: 判据共识的那 3 发就在下面这一行发出去,
+        // 而 D-6 要它们照规格包的 `interfaces` 写符号名 —— 排在分类之后就永远赶不上那趟车。
+        // 同一份 `text` 稍后 (loopSurveyPack 那一处) 追加到勘察包末尾, conductor 面与 work
+        // 子节点也读它 —— **一次生成, 一份文本**, 不新开第二个注入口 (D-1)。
+        //
+        // `generate` 必须回落到引擎默认实现: `config.dag.generate` 是测试注入口, 生产从来不设
+        // (2026-09-06 author-cons 臂 80/80 题量了个空, 就是只读注入口那一次)。
+        // 座位 = **执行座** (`agent` 座由装配层解析进 agentLeafModel/leafModel), 不换家族 ——
+        // R4 换家族已判负, 这一发要的是"执行侧自己对上游的记忆", 换座反而换掉了那份记忆。
+        if (specPackEnabled()) {
+          const specGenerate = config.dag.generate ?? makeDefaultGenerate(config.dag.sessionId ?? randomUUID());
+          specPack = await buildSpecPack(g, survey?.text ?? '', {
+            generate: async ({ model, prompt }) =>
+              (await specGenerate({ messages: [{ role: 'user', content: prompt }], model, traceName: 'goal:spec-pack' })).text,
+            model: config.dag.agentLeafModel ?? config.dag.leafModel,
+          });
+        }
+        // 勘察空手且规格包缺席 ⇒ 整段不传, 那一发的 prompt 与加这一段之前**逐字相同** (INV-4)。
+        // 规格包在场时挂在勘察正文**末尾** —— 与它稍后进勘察包的位置一致, 两处读到的是同一段文本。
+        const surveyForClassify = [survey?.text, specPack?.text].filter((t) => t !== undefined && t !== '').join('\n\n');
         return classifyGoal(g, {
           generate: config.dag.generate ?? makeDefaultGenerate(config.dag.sessionId ?? randomUUID()),
           model: config.dag.conductorModel,
@@ -1623,7 +1652,7 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
           // (账本读数: 真跑过的 69 跑里它红过 0 次)。这一行就是那条 wire。
           repoRoot: config.cwd,
           // 勘察空手 (三段全空) 时不传 —— 那一发的 prompt 与加这一段之前逐字相同 (D-2)。
-          ...(survey?.text ? { survey: survey.text } : {}),
+          ...(surveyForClassify ? { survey: surveyForClassify } : {}),
         });
       }))(goal);
   // 探针裁决钩子: 分类定稿后恰好调一次 (含 fallback / 探索型), 进 `_runDag` 与任何运行记录之前。
@@ -2119,7 +2148,19 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   //
   // 位置: 分类定稿之后 (判据已知)、装配 conductor 面之前 (它要拿到"已经写好了"这句话)。
   // W1 勘察包在这里算一次: 出题人要它当输入, 装配面也要它 —— 同一份传下去, 不算两遍。
-  const loopSurveyPack = loopPlan !== undefined ? buildLoopSurveyPack(conductorGoalOf(loopPlan, task), config.cwd) : undefined;
+  let loopSurveyPack = loopPlan !== undefined ? buildLoopSurveyPack(conductorGoalOf(loopPlan, task), config.cwd) : undefined;
+  // R7 (D-1): 规格包**追加到勘察包末尾**, 不新开注入口 —— 于是 conductor 面与每个 work 子节点
+  // (`withLoopConfig` → `buildConductorFace` 的 `surveyPack`) 和 R4 出题人的 `surveyText`
+  // 全都读到同一段文本, 与上面进共识 prompt 的那一段逐字相同。
+  // 规格包缺席 ⇒ 这一步整个不动, 勘察包逐字节回到加它之前 (INV-4)。
+  // ⚠ 开着开关时 `loop.surveyPack.chars` **含规格包那一段** (它就是真发出去的字节数);
+  // 规格包自己那半在 `loop.specPack.chars` 上单列, 两个数相减即勘察包本身 —— 别把涨的那部分
+  // 读成"勘察变大了" (加尺子必然让数难看那一条)。
+  if (loopSurveyPack && specPack?.text) {
+    // 勘察包本身空手时不补前导空行 —— 空壳头行会让对照臂的字节数无端变化。
+    const text = loopSurveyPack.text === '' ? specPack.text : `${loopSurveyPack.text}\n\n${specPack.text}`;
+    loopSurveyPack = { ...loopSurveyPack, text, facts: { ...loopSurveyPack.facts, chars: text.length } };
+  }
   // D-9 开关: 默认关 (先当单变量臂)。⚠ 只有显式 `cross` 才开, 其余取值 (含缺席/空串/'1') 一律照旧,
   // 存量行为逐字节不变 —— 那是对照臂能成立的前提。
   if (loopPlan !== undefined && runnable && process.env.OMD_CRITERION_AUTHOR?.trim() === 'cross') {
@@ -3057,6 +3098,9 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
         ...(classified.criterionConsensus ? { criterionConsensus: classified.criterionConsensus } : {}),
         // W1 勘察包读数 (2026-09-06): 装配期写在 ConductorCardLedger 上, 这里提到 loop (同款分层)。缺席 = 没装配编排循环。
         ...(loopLedger.surveyPack ? { surveyPack: loopLedger.surveyPack } : {}),
+        // R7 规格包读数 (2026-09-07): 同一条理由挂在 loop 上。缺席 = 开关没开 / 没走真分类那条路
+        // (三态见 LoopLedger.specPack); 在场且 samples:0 = 采了没成, 两者别并掉 (§静默坑 1)。
+        ...(specPack ? { specPack: { ...specPack.facts, ...(specPack.why ? { why: specPack.why } : {}) } } : {}),
         // R4 异族先写判据读数 (2026-09-06): 同一条理由挂在 loop 上。缺席 = 开关没开 (三态见 LoopLedger.criterionAuthor)。
         ...(loopLedger.criterionAuthor ? { criterionAuthor: loopLedger.criterionAuthor } : {}),
         // R5 并行实装扇出读数 (2026-09-06): 同一条理由挂在 loop 上。缺席 = 没扇出 (三态见 LoopLedger.fanout)。
