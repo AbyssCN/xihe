@@ -173,3 +173,23 @@ describe('#241 坐标机械校验闸 — 非 detached 接线点 (goal 文本, �
     expect(ranGoals).toHaveLength(1);
   });
 });
+
+// ── 2026-09-07 Web 子集: 用户 goal 里的未存在路径只告警不拒 ──────────────────────
+describe('#241 — goal 文本形状 ② 降级为告警', () => {
+  test('★ goal 提到将要产出的 `www/fix-report.json` (盘上不在) → 照常点火 (证伪: 去掉 goal+path-missing 分流 ⇒ 红)', async () => {
+    const ranGoals: string[] = [];
+    const root = freshRoot();
+    const tool = makeTool(root, [], ranGoals);
+    const out = await call(tool, { goal: 'Write the build results into `www/fix-report.json`.' });
+    expect(out.isError).not.toBe(true);
+    expect(ranGoals).toHaveLength(1);
+  });
+  test('goal 里编造的符号 (形状 ③) 仍拒 (降级没扩到别的形状)', async () => {
+    const ranGoals: string[] = [];
+    const root = freshRoot();
+    const tool = makeTool(root, [], ranGoals);
+    const out = await call(tool, { goal: 'call `zzzFabricatedSymbolQ` in `src/real.ts`' });
+    expect(out.isError).toBe(true);
+    expect(ranGoals).toHaveLength(0);
+  });
+});

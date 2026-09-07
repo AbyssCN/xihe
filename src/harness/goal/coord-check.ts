@@ -211,8 +211,15 @@ function lineText(text: string, lineNo: number): string {
  *   - `gate-allow(coord-check): <理由>` —— 引用语境: 这一行在**说明**某个坐标/符号,
  *     而不是在用它。本闸只看字面, 不加这条就只能靠改述绕开, 反面教材随之磨掉。
  */
+/**
+ * 「将要新建」的英文线索 (2026-09-07, workbuddy Web 子集: instruction 是英文, 「Create `/workspace/www/x.json`」
+ * 「required output path」「write … to `src/a.tsx`」全被形状 ② 当成编造路径拒了点火)。只认整词, 大小写不敏感。
+ * 证伪: 去掉这条 ⇒ coord-check.test.ts「英文新建线索豁免」红。
+ */
+const CREATE_CUE_RE = /\b(?:create|creates|created|new|write|writes|generate|generates|produce|produces|output|outputs|save|saves|emit|emits|deliver|deliverable|add|adds|scaffold|required)\b/i;
 function isCoordExempt(line: string): boolean {
-  return line.includes('新建') || gateAllowReason(line, 'coord-check') !== null;
+  // 线索只在反引号**之外**找: `src/new-baz.ts` 里的 new 是文件名, 不是「将要新建」(既有测试当场抓到)。
+  return line.includes('新建') || CREATE_CUE_RE.test(line.replace(/`[^`]*`/g, '')) || gateAllowReason(line, 'coord-check') !== null;
 }
 
 export function checkCoords(text: string, opts: CoordCheckOpts): CoordFinding[] {

@@ -712,9 +712,23 @@ function coordIgnitionGate(
   force: boolean | undefined,
   runId: string,
 ): { content: { type: 'text'; text: string }[]; isError: true } | undefined {
-  const findings = texts.flatMap(({ label, text }) =>
-    checkCoords(text, { root }).map((f) => `[${label}] ${f.message}`),
-  );
+  // 2026-09-07 (workbuddy Web 子集 64/70 题点火被拒的第二层根因): `goal` 是**用户的**请求, 不是 conductor
+  // 派工文本 —— 用户写「把结果写到 `/workspace/www/fix-report.json`」时那个文件本来就不存在。0f67293b 那种
+  // 「编造坐标被执行体照抄」的病灶在 goal 文本上只剩形状 ①③ (行号越界 / 符号不在文件里) 还是可证伪的,
+  // 形状 ② 「路径盘上不在」对用户 goal 只告警不拒; SDD 文本 (Aalto 写的) 三形状照旧全拒。
+  // 证伪: 把下面的 `label === 'goal' && f.criterion === 'path-missing'` 那支去掉 ⇒ goal-coord-gate.test.ts
+  // 「goal 里的未存在路径不拒点火」红。
+  const refusals: string[] = [];
+  const warnings: string[] = [];
+  for (const { label, text } of texts) {
+    for (const f of checkCoords(text, { root })) {
+      (label === 'goal' && f.criterion === 'path-missing' ? warnings : refusals).push(`[${label}] ${f.message}`);
+    }
+  }
+  if (warnings.length > 0) {
+    logger.warn({ runId, warnings }, '[dag_goal] #241: goal 文本里的路径盘上不在 → 只告警 (用户 goal 提到将要产出的文件是常态)');
+  }
+  const findings = refusals;
   if (findings.length === 0) return undefined;
   if (force) {
     logger.warn(

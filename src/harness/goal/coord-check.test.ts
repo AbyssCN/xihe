@@ -344,3 +344,17 @@ describe('形状 ③ 对文档/数据文件与文件标签不适用', () => {
     expect(f?.identifier).toBe('madeUpSymbol');
   });
 });
+
+// ── 2026-09-07 Web 子集: 英文「将要新建」线索也豁免形状 ①② ──────────────────────
+describe('英文新建线索豁免', () => {
+  test('★ "Create `www/fix-report.json`" ⇒ 不报 path-missing (证伪: 去掉 CREATE_CUE_RE ⇒ 红)', () => {
+    expect(checkCoords('Create `www/fix-report.json` with the fix summary.', { root: '/repo', readFile: read })).toEqual([]);
+  });
+  test('★ "The required output path is `src/components/AppHeader.tsx`" ⇒ 不报', () => {
+    expect(checkCoords('The required output path is `src/components/AppHeader.tsx`', { root: '/repo', readFile: read })).toEqual([]);
+  });
+  test('没有线索的裸路径照报 (豁免没扩成全放)', () => {
+    const f = checkCoords('Look at `src/components/AppHeader.tsx` first.', { root: '/repo', readFile: read });
+    expect(f.some((x) => x.criterion === 'path-missing')).toBe(true);
+  });
+});
