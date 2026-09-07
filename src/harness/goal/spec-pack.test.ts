@@ -164,7 +164,7 @@ describe('接口条数上限: 先丢 guess, 不把需求清单挤成 0', () => {
     ];
     const reqs = Array.from({ length: 20 }, (_, i) => ({ text: `需求 ${i} ` + 'z'.repeat(40), source: 'inferred' }));
     const body = JSON.stringify({ project: 'p', interfaces: ifaces, conventions: [], requirements: reqs });
-    const pack = await buildSpecPack('goal', '', { generate: async () => ({ text: body, usage: { in: 0, out: 0 } }) as never, samples: 1, maxChars: 6000 });
+    const pack = await buildSpecPack('goal', '', { generate: async () => body, samples: 1, maxChars: 6000 });
     expect(pack.facts.interfaces).toBeLessThanOrEqual(12);
     expect(pack.text.match(/`repo_\d+`/g)?.length).toBe(5);
     expect(pack.facts.requirements).toBe(20);
