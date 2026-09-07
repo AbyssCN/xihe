@@ -23,6 +23,7 @@ import type { CriterionSurveyFacts } from './criterion-survey';
 import type { ConsensusWithUnion } from './criterion-union';
 import type { ImpactPackFacts } from './impact-pack';
 import type { RunnerReady } from './runner-ready';
+import type { SpecPackFacts } from './spec-pack';
 import type { CriterionAuthorResult } from './criterion-author';
 
 export interface LoopDispatch {
@@ -367,6 +368,16 @@ export interface LoopLedger {
    * (2026-09-06 合并时接的那一跳: `surveyPack: loopLedger.surveyPack`)。
    */
   surveyPack?: SurveyPackFacts;
+  /**
+   * R7 规格包读数 (2026-09-07, 见 `./spec-pack`): 上游对齐 + 需求枚举那一发算出了什么。
+   *
+   * 挂这里的理由同上面几格: 只有 `r.loop` 整份 JSON 出得了 bench 容器。
+   * ⚠ 三态别压平 (§静默坑 1): 整格缺席 = **没算规格包** (`OMD_SPEC_PACK` 不是 `1` /
+   * 注入式分类器 / 闸 C 复用上次分类); 在场且 `samples: 0` = 采了但一份都没解析出来
+   * (那时 `why` 在场, 原文在里面)。契约预注册要收的是
+   * `upstreamNamed / guessed / requirements / fromInstruction` 分布与 `chars`。
+   */
+  specPack?: SpecPackFacts & { why?: string };
   /**
    * 判据三候选共识的一致性读数 (2026-09-05, 见 `./criterion-consensus`)。
    *
