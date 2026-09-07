@@ -54,6 +54,14 @@ const SOURCE_EXT = '(?:ts|tsx|js|json|md)';
  * 关键: ` 新建:` (有空格) · `、` (单字符) · `26 + 30` (数字起) 全不命中。
  */
 const IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]{2,}$/;
+/** 形状 ③ 不适用的文件: 文档 / 数据 (标识符不会以原文出现在里面, 见 checkCoords 内注)。 */
+const isDocOrDataPath = (path: string): boolean => /\.(?:md|json)$/i.test(path);
+/** `game_design_brief` ↔ `game-design-brief.md`: 标签归一后等于文件名 ⇒ 是文件的别名, 不是符号。 */
+const isLabelOfFile = (ident: string, path: string): boolean => {
+  const norm = (s: string): string => s.toLowerCase().replace(/[_-]/g, '');
+  const base = path.slice(path.lastIndexOf('/') + 1).replace(/\.[A-Za-z0-9]+$/, '');
+  return norm(ident) === norm(base);
+};
 
 /**
  * `path:line` 形状: 路径 + `:` + 行号。**整词匹配** (`$`), 避免 `path:5-10` 这种范围引用
@@ -286,6 +294,13 @@ export function checkCoords(text: string, opts: CoordCheckOpts): CoordFinding[] 
         if (om1) path = om1.groups!.path!;
         else if (om2 && other.content.includes('/')) path = om2.groups!.path!;
         if (path === null) continue;
+        // 形状 ③ 只对**代码文件**成立 (2026-09-07, workbuddy Web 子集 64/70 题点火被拒的根因):
+        // instruction 把附件写成「`game_design_brief`: `/workspace/…/game-design-brief.md`」——
+        // 标签 + 文档路径同句共现, 而「标识符必须在文件里 grep 命中」只对源码有意义, 对 .md/.json
+        // 这类文档/数据文件不是可证伪判据 (附件标签、JSON 键都不会以标识符原文出现)。
+        // 另一层: 标签归一后 (下划线→连字符, 去扩展名) 等于文件名, 那就是「给这个文件起的名」, 不是符号。
+        // 证伪: 去掉这两跳 ⇒ coord-check.test.ts「附件标签 + 文档路径不报」红。
+        if (isDocOrDataPath(path) || isLabelOfFile(tok.content, path)) continue;
         const content = read(resolve(opts.root, path));
         // 路径本身不存在 → 由形状 ①② 那边报, 这里跳过避免「两条 finding 同句」
         if (content === null) continue;

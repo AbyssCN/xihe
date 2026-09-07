@@ -40,6 +40,9 @@ const files: Record<string, string> = {
   '/repo/src/short.ts': ['line1', 'line2', 'line3'].join('\n'),
   // 给「路径存在但不带 /」路径 (`tsconfig.json` 同款) 测「裸路径不含 /」豁免用。
   '/repo/tsconfig.json': '{ "compilerOptions": {} }',
+  // 2026-09-07 Web 子集: 附件标签 + 文档路径 (标签在文档里不会以原文出现)。
+  '/repo/public-assets/brief/game-design-brief.md': '# Game design brief\n\nA cozy atmosphere game.\n',
+  '/repo/public-assets/data/tasks.json': '{"tasks":[{"id":1}]}',
 };
 
 /** 注入式 read: 不在 files map → 视为读不到 (= 盘上不存在)。 */
@@ -321,5 +324,23 @@ describe('checkCoords — 零涟漪 (INV-W241-4) 与全白名单', () => {
     const r = checkCoords(text, { root: ROOT, readFile: read });
     const idf = r.filter((x) => x.criterion === 'identifier-not-in-file');
     expect(idf).toHaveLength(1);
+  });
+});
+// ── 2026-09-07 Web 子集: 附件标签 + 文档/数据路径不是形状 ③ ────────────────────
+// 现场: workbuddy Web 64/70 题在点火前被拒, instruction 形如「- `game_design_brief`: `/workspace/…/game-design-brief.md`」。
+// 证伪: 去掉 checkCoords 里 `isDocOrDataPath || isLabelOfFile` 那一跳 ⇒ 下面两条红。
+describe('形状 ③ 对文档/数据文件与文件标签不适用', () => {
+  test('★ 附件标签 + .md 路径同句 ⇒ 不报', () => {
+    const text = '- `game_design_brief`: `public-assets/brief/game-design-brief.md` text/markdown';
+    expect(checkCoords(text, { root: '/repo', readFile: read })).toEqual([]);
+  });
+  test('★ 任意标识符 + .json 路径同句 ⇒ 不报 (JSON 键不以标识符原文出现)', () => {
+    const text = 'read `board_state` from `public-assets/data/tasks.json`';
+    expect(checkCoords(text, { root: '/repo', readFile: read })).toEqual([]);
+  });
+  test('源码文件上真阳性照报 (豁免没有扩到 .ts)', () => {
+    const text = 'call `madeUpSymbol` in `src/exists.ts`';
+    const f = findBy(checkCoords(text, { root: '/repo', readFile: read }), (x) => x.criterion === 'identifier-not-in-file');
+    expect(f?.identifier).toBe('madeUpSymbol');
   });
 });
