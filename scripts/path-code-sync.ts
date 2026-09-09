@@ -53,7 +53,7 @@ const rawIssues = JSON.parse(raw) as { number: number; state: string; labels: { 
 const mapNumbers = rawIssues.filter((i) => i.labels.some((l) => l.name === 'path:map')).map((i) => i.number);
 const mapStateOfTicket = new Map<number, 'OPEN' | 'CLOSED'>();
 for (const m of mapNumbers) {
-  const q = `query { repository(owner:"${process.env.GH_OWNER ?? 'AbyssCN'}", name:"${process.env.GH_REPO ?? 'oh-my-dag-dev'}") { issue(number:${m}) { state subIssues(first:100){nodes{number}} } } }`;
+  const q = `query { repository(owner:"${process.env.OMD_GH_OWNER ?? 'AbyssCN'}", name:"${process.env.OMD_GH_REPO ?? 'oh-my-dag-dev'}") { issue(number:${m}) { state subIssues(first:100){nodes{number}} } } }`;
   try {
     const res = JSON.parse(run('gh', ['api', 'graphql', '-f', `query=${q}`])) as {
       data: { repository: { issue: { state: string; subIssues: { nodes: { number: number }[] } } | null } };
