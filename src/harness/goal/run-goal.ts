@@ -123,6 +123,7 @@ import { surveyForCriterion, type CriterionSurvey } from './criterion-survey';
 import { buildLoopSurveyPack, conductorCtxOf, conductorGoalOf, withLoopConfig, type LoopHost } from './loop-run';
 import { authorCriterionCrossFamily, type CriterionAuthorResult } from './criterion-author';
 import { buildSpecPack, specPackEnabled, type SpecPack } from './spec-pack';
+import { buildGoalRecall, goalRecallEnabled, type GoalRecall } from './goal-recall';
 
 // D-I: 两条轴的类型与分类器都归 ./acceptance (那里是判据轴的单一真源); 此处 re-export 保旧调用面。
 export type { AcceptanceSpec, GoalClassification, GoalTier } from './classify-acceptance';
@@ -1609,6 +1610,8 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
    * 「算了但一份采样都没成」(在场且 `samples: 0`) 是两件事 (§静默坑 1)。
    */
   let specPack: SpecPack | undefined;
+  /** 按 goal 召回 (2026-09-11): 与规格包同一条注入口, 缺席 = 没开。 */
+  let goalRecall: GoalRecall | undefined;
   const classified = prior
     ? prior.classified
     : await (config._classify ??
@@ -1639,9 +1642,14 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
             model: config.dag.agentLeafModel ?? config.dag.leafModel,
           });
         }
+        // 按 goal 召回一次 (2026-09-11, `OMD_GOAL_RECALL=1`): 与规格包同款, 生成一次、一份文本, 挂勘察末尾。
+        if (goalRecallEnabled()) {
+          goalRecall = await buildGoalRecall(g, config.cwd);
+          logger.info({ ...goalRecall.facts }, '[omd/goal] 按 goal 召回引擎记忆 (线索段)');
+        }
         // 勘察空手且规格包缺席 ⇒ 整段不传, 那一发的 prompt 与加这一段之前**逐字相同** (INV-4)。
         // 规格包在场时挂在勘察正文**末尾** —— 与它稍后进勘察包的位置一致, 两处读到的是同一段文本。
-        const surveyForClassify = [survey?.text, specPack?.text].filter((t) => t !== undefined && t !== '').join('\n\n');
+        const surveyForClassify = [survey?.text, specPack?.text, goalRecall?.text].filter((t) => t !== undefined && t !== '').join('\n\n');
         return classifyGoal(g, {
           generate: config.dag.generate ?? makeDefaultGenerate(config.dag.sessionId ?? randomUUID()),
           model: config.dag.conductorModel,
@@ -2163,6 +2171,11 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
   if (loopSurveyPack && specPack?.text) {
     // 勘察包本身空手时不补前导空行 —— 空壳头行会让对照臂的字节数无端变化。
     const text = loopSurveyPack.text === '' ? specPack.text : `${loopSurveyPack.text}\n\n${specPack.text}`;
+    loopSurveyPack = { ...loopSurveyPack, text, facts: { ...loopSurveyPack.facts, chars: text.length } };
+  }
+  // 记忆线索同上 (2026-09-11): 追加到勘察包末尾, conductor 面与 work 子节点读同一段。`loop.goalRecall.chars` 单列。
+  if (loopSurveyPack && goalRecall?.text) {
+    const text = loopSurveyPack.text === '' ? goalRecall.text : `${loopSurveyPack.text}\n\n${goalRecall.text}`;
     loopSurveyPack = { ...loopSurveyPack, text, facts: { ...loopSurveyPack.facts, chars: text.length } };
   }
   // D-9 开关: 默认关 (先当单变量臂)。⚠ 只有显式 `cross` 才开, 其余取值 (含缺席/空串/'1') 一律照旧,
@@ -3113,6 +3126,8 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
         // R7 规格包读数 (2026-09-07): 同一条理由挂在 loop 上。缺席 = 开关没开 / 没走真分类那条路
         // (三态见 LoopLedger.specPack); 在场且 samples:0 = 采了没成, 两者别并掉 (§静默坑 1)。
         ...(specPack ? { specPack: { ...specPack.facts, ...(specPack.why ? { why: specPack.why } : {}) } } : {}),
+        // 召回读数 (2026-09-11): 缺席 = 没开; 在场 admitted 0 = 开了没命中 (why 在场)。
+        ...(goalRecall ? { goalRecall: goalRecall.facts } : {}),
         // R4 异族先写判据读数 (2026-09-06): 同一条理由挂在 loop 上。缺席 = 开关没开 (三态见 LoopLedger.criterionAuthor)。
         ...(loopLedger.criterionAuthor ? { criterionAuthor: loopLedger.criterionAuthor } : {}),
         // R5 并行实装扇出读数 (2026-09-06): 同一条理由挂在 loop 上。缺席 = 没扇出 (三态见 LoopLedger.fanout)。

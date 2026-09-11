@@ -379,6 +379,11 @@ export interface LoopLedger {
    */
   specPack?: SpecPackFacts & { why?: string };
   /**
+   * 按 goal 召回一次的读数 (2026-09-11, 见 `./goal-recall`)。三态: 整格缺席 = 没开 (`OMD_GOAL_RECALL` 不是 `1`);
+   * 在场且 `admitted: 0` = 开了没命中 (`why` 在场)。预注册要收 hits / admitted / chars 分布。
+   */
+  goalRecall?: import('./goal-recall').GoalRecallFacts;
+  /**
    * 判据三候选共识的一致性读数 (2026-09-05, 见 `./criterion-consensus`)。
    *
    * 挂这里的理由同上面两格: 只有 `r.loop` 整份 JSON 出得了 bench 容器。
