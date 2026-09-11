@@ -136,7 +136,7 @@ describe('applyPresetHeadless', () => {
     // env 矩阵注入 (精确值)。
     expect(env.OMD_ITER_CONDUCTOR_MODEL).toBe('kimi-coding:k3-256k');
     expect(env.OMD_ITER_LEAF_MODEL).toBe('deepseek:deepseek-v4-flash');
-    expect(env.OMD_REDUCE_MODEL).toBe('mimo:mimo-v2.5-pro-ultraspeed');
+    expect(env.OMD_REDUCE_MODEL).toBe('minimax-cn:MiniMax-M3'); // 2026-09-11: 合成座换 M3
     expect(env.OMD_JUDGE_MODEL).toBe('kimi-coding:k3-256k');
     // 写盘。
     expect(readFileSync(join(dir, '.env'), 'utf8')).toContain('OMD_ITER_CONDUCTOR_MODEL');
@@ -149,7 +149,7 @@ describe('applyPresetHeadless', () => {
     // dream 座 2026-08-02 摘除 (ADR-0003) —— preset 不该再往 config 里写它。
     expect(cfg.models.dream).toBeUndefined();
     expect(cfg.models.plan).toBeUndefined();
-    expect(cfg.multimodalPool).toEqual(['mimo:mimo-v2.5']);
+    expect(cfg.multimodalPool).toEqual(['minimax-cn:MiniMax-M3']);
   });
 
   test('未知 preset → throw', () => {

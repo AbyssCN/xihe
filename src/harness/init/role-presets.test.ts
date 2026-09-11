@@ -10,8 +10,8 @@ import { ROLE_PRESETS, ROLE_ENV_ALLOWLIST, coordProvider } from './role-presets'
 const COORD_RE = /^[a-z0-9-]+:\S+$/;
 
 describe('ROLE_PRESETS 形状', () => {
-  test('恰好四档, id 唯一且非空 label', () => {
-    expect(ROLE_PRESETS.length).toBe(4);
+  test('恰好五档, id 唯一且非空 label', () => {
+    expect(ROLE_PRESETS.length).toBe(5);
     const ids = ROLE_PRESETS.map((p) => p.id);
     expect(new Set(ids).size).toBe(ids.length);
     for (const p of ROLE_PRESETS) {
@@ -76,7 +76,8 @@ describe('ROLE_PRESETS 形状', () => {
   });
 
   test('env 里引用的 provider 必可解析 (内置 env / customApis 注册 / pi OAuth 通道)', () => {
-    const builtin = new Set(['deepseek', 'mimo']);
+    // claude-code = Claude 订阅 SDK 通道 (凭证是 claude CLI 登录, 不经 env key 也不经 pi auth.json), 引擎恒认识。
+    const builtin = new Set(['deepseek', 'mimo', 'claude-code']);
     for (const p of ROLE_PRESETS) {
       const registered = new Set([...builtin, ...(p.customApis ?? []).map((a) => a.id), ...(p.oauthProviders ?? [])]);
       for (const [key, value] of Object.entries(p.env)) {

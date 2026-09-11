@@ -31,6 +31,7 @@ import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { DONE_GRACE_MS, candidateHudDirs } from './load';
 import { HUD_SCHEMA, type HudDagSnapshot } from './types';
+import { logger } from '../harness/logger';
 
 export const STALE_RUNNING_ARCHIVE_MS = 24 * 3600_000;
 export const HUD_ARCHIVE_DIR = 'archive';
@@ -83,7 +84,9 @@ export function sweepHudSnapshots(cwd: string, nowMs: number, opts: HudGcOpts): 
     let files: string[];
     try {
       files = readdirSync(dir);
-    } catch {
+    } catch (err) {
+      // fail-open 吞异常不吞证据 (仓规静默坑 2): 候选目录不存在是常态, 但读不动要留原文。
+      logger.debug({ dir, err: err instanceof Error ? err.message : String(err) }, '[hud/gc] 候选目录读不动 → 跳过');
       continue;
     }
     for (const file of files) {
@@ -92,7 +95,8 @@ export function sweepHudSnapshots(cwd: string, nowMs: number, opts: HudGcOpts): 
       let snap: Partial<HudDagSnapshot>;
       try {
         snap = JSON.parse(readFileSync(full, 'utf-8')) as Partial<HudDagSnapshot>;
-      } catch {
+      } catch (err) {
+        logger.debug({ file: full, err: err instanceof Error ? err.message : String(err) }, '[hud/gc] 快照坏 JSON → 跳过');
         continue;
       }
       if (!snap || snap.schema !== HUD_SCHEMA || typeof snap.runId !== 'string' || typeof snap.updatedAt !== 'string') continue;

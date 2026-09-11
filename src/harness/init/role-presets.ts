@@ -9,9 +9,10 @@
  *   ① 基础档 base-opencode-go —— 一把 OPENCODE_API_KEY 走 opencode go 网关, 多家族混编:
  *     deepseek-v4 掌舵/铺量, qwen3.7-plus agent+多模态, glm-5.2 合成+verifier (跨家族一把 key 实现)。
  *   ② 中间档 cn-standard —— deepseek v4 直连: pro 关键角色, flash 铺量;
- *     mimo-2.5 管多模态池 + verifier 跨家族。
+ *     MiniMax M3 管多模态池 + verifier 跨家族。
  *   ③ 顶配档 cn-ultimate —— kimi k3 掌舵, deepseek pro 评判/合成, qwen 干活+verifier,
- *     zhipu glm-5.2 审查 Spec 轴 + premium 多模态, mimo ultraspeed 极速多模态。
+ *     zhipu glm-5.2 审查 Spec 轴 + premium 多模态, MiniMax M3 多模态。
+ *   ⓪ 生产档 m3-codex —— 本仓 2026-09 生产配置: M3 全高频座 + 两条订阅通道 (codex sol 终审 / opus 升级)。
  */
 import type { ModelRole } from '../../model/role-models';
 
@@ -25,10 +26,14 @@ export const ZHIPU_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
 // —— 模型坐标 (provider:model) · 换代只改这里 ——
 const DS_FLASH = 'deepseek:deepseek-v4-flash';
 const DS_PRO = 'deepseek:deepseek-v4-pro';
-// ⚠ mimo id 带 `v` (issue #8): xiaomimimo 端点 (MIMO_BASE_URL) 只认 `mimo-v2.5*`, 无 `v` 一律
-// 400 Unsupported model。全库其它 mimo 坐标 (cost-ledger / controller / executor-dag-types) 均带 v。
-const MIMO_25 = 'mimo:mimo-v2.5';
-const MIMO_ULTRASPEED = 'mimo:mimo-v2.5-pro-ultraspeed';
+// MiniMax M3 (minimax-cn 直连, OpenAI 兼容, 原生多模态, 1M 上下文): 2026-09-11 起取代 mimo 坐标 ——
+// mimo 两个账户早已打光 (.env 注 2026-07-27), 预设里钉着它 = 新用户一装就落死座。同一坐标同时管
+// 多模态池与合成座 (M3 原生吃图, 不再需要 ultraspeed 那一档)。
+const MINIMAX_M3 = 'minimax-cn:MiniMax-M3';
+export const MINIMAX_BASE_URL = 'https://api.minimaxi.com/v1';
+// Claude 订阅通道 (Agent SDK, 凭证 = claude CLI 登录) 与 ChatGPT 订阅通道 (pi OAuth): 都免 env key。
+const CLAUDE_OPUS = 'claude-code:claude-opus-5';
+const CODEX_SOL = 'openai-codex:gpt-5.6-sol';
 // kimi-coding = pi OAuth 通道 (baf1295 统一模型层): 免 API key, 凭证走 ~/.pi/agent/auth.json。
 // owner 裁 (2026-08-10): 一律 256k 档 (k3-256k) —— 同模型小上下文档, 降订阅配额消耗。
 const KIMI_CODING_K3 = 'kimi-coding:k3-256k';
@@ -109,6 +114,9 @@ export interface RolePreset {
   configRoles?: RolePresetConfigRole[];
 }
 
+const MINIMAX_API: RolePresetCustomApi = { id: 'minimax-cn', baseUrl: MINIMAX_BASE_URL, keyEnv: 'MINIMAX_API_KEY' };
+const MINIMAX_KEY_PROMPT: RolePresetKeyPrompt = { env: 'MINIMAX_API_KEY', label: 'MiniMax API key (M3: 多模态池 + 合成)', provider: 'minimax-cn' };
+
 export const ROLE_PRESETS: readonly RolePreset[] = [
   {
     id: 'base-opencode-go',
@@ -144,7 +152,7 @@ export const ROLE_PRESETS: readonly RolePreset[] = [
   },
   {
     id: 'cn-standard',
-    label: '中间档 (deepseek v4 + mimo) — pro 关键角色, flash 铺量, mimo 多模态 + verifier',
+    label: '中间档 (deepseek v4 + MiniMax M3) — pro 关键角色, flash 铺量, M3 多模态 + verifier',
     env: {
       // pro 掌关键角色 (runtime/规划/评判/终审/升级)
       OMD_RUNTIME_PROVIDER: 'deepseek',
@@ -163,17 +171,18 @@ export const ROLE_PRESETS: readonly RolePreset[] = [
       OMD_LENS_MODEL: DS_FLASH,
       OMD_REDUCE_MODEL: DS_FLASH,
     },
-    multimodalPool: [MIMO_25],
-    // verifier 跨家族 (mimo ≠ deepseek 主力, 避同源盲点)。
-    configRoles: [{ role: 'verifier', coord: MIMO_25 }],
+    multimodalPool: [MINIMAX_M3],
+    // verifier 跨家族 (minimax ≠ deepseek 主力, 避同源盲点)。
+    configRoles: [{ role: 'verifier', coord: MINIMAX_M3 }],
+    customApis: [MINIMAX_API],
     keyPrompts: [
       { env: 'DEEPSEEK_API_KEY', label: 'DeepSeek API key (主力)', provider: 'deepseek' },
-      { env: 'MIMO_API_KEY', label: 'MiMo API key (多模态池 + verifier)', provider: 'mimo' },
+      MINIMAX_KEY_PROMPT,
     ],
   },
   {
     id: 'cn-ultimate',
-    label: '顶配档 (kimi k3 掌舵[pi OAuth 免 key] + deepseek 评判 + qwen 干活 + zhipu 审查 + mimo 极速多模态)',
+    label: '顶配档 (kimi k3 掌舵[pi OAuth 免 key] + deepseek 评判 + qwen 干活 + zhipu 审查 + MiniMax M3 多模态)',
     env: {
       // kimi-coding k3 掌舵 (pi OAuth, 免 key): runtime + 规划 + 分解 + 升级
       OMD_RUNTIME_PROVIDER: 'kimi-coding',
@@ -195,16 +204,16 @@ export const ROLE_PRESETS: readonly RolePreset[] = [
       OMD_CG_AGENT_MODEL: QWEN_PLUS,
       OMD_ITER_AGENT_MODEL: QWEN_PLUS,
       // router bandit 候选池 (pool[0] = 静态默认)
-      OMD_ROUTER_POOL_INPROC: `${QWEN_PLUS},${MIMO_ULTRASPEED}`,
+      OMD_ROUTER_POOL_INPROC: `${QWEN_PLUS},${MINIMAX_M3}`,
       OMD_ROUTER_POOL_AGENT: `${QWEN_PLUS},${QWEN_MAX}`,
     },
-    multimodalPool: [QWEN_PLUS, MIMO_25],
+    multimodalPool: [QWEN_PLUS, MINIMAX_M3],
     multimodalPoolPremium: [ZHIPU_GLM, KIMI_CODING_K3],
     // verifier 跨家族 → qwen max (≠ kimi 掌舵 / deepseek 评判)
     configRoles: [{ role: 'verifier', coord: QWEN_MAX }],
     // 掌舵走 pi OAuth (免 key; 未登录 → wizard 出 /login 指引并剔除 kimi-coding 坐标)。
     oauthProviders: ['kimi-coding'],
-    customApis: [
+    customApis: [MINIMAX_API, 
       { id: 'qwen', baseUrl: QWEN_BASE_URL, keyEnv: 'QWEN_API_KEY' },
       { id: 'zhipu', baseUrl: ZHIPU_BASE_URL, keyEnv: 'ZHIPU_API_KEY' },
     ],
@@ -212,16 +221,16 @@ export const ROLE_PRESETS: readonly RolePreset[] = [
       { env: 'QWEN_API_KEY', label: 'Qwen (DashScope) API key (干活 + verifier + 多模态)', provider: 'qwen' },
       { env: 'ZHIPU_API_KEY', label: 'Zhipu API key (review Spec 轴 + premium 多模态)', provider: 'zhipu' },
       { env: 'DEEPSEEK_API_KEY', label: 'DeepSeek API key (评判 + 合成)', provider: 'deepseek' },
-      { env: 'MIMO_API_KEY', label: 'MiMo API key (极速多模态)', provider: 'mimo' },
+      MINIMAX_KEY_PROMPT,
     ],
   },
   {
     // ④ 三家档 cn-trio —— Opus 座舱下的 MCP 引擎配置 (掌舵实为 Claude, 引擎内部角色分三家):
-    //   kimi k3 掌 conductor/judge, ds-flash 铺 fleet, mimo ultraspeed 管 synth + 多模态。
+    //   kimi k3 掌 conductor/judge, ds-flash 铺 fleet, MiniMax M3 管 synth + 多模态。
     //   无 OMD_PLAN_MODEL/plan 角色 —— 审议座舱由 Opus 4.8 顶替, plan 在 MCP 模式冗余 (仅独立 TUI 消费)。
     //   kimi-coding 认证走 ~/.pi/agent/auth.json (api_key 或 pi OAuth), 免 env key。
     id: 'cn-trio',
-    label: '三家档 (kimi k3 掌舵/评判 + ds-flash 铺量/做梦 + mimo ultraspeed 合成/多模态) — Opus 座舱下的引擎配置',
+    label: '三家档 (kimi k3 掌舵/评判 + ds-flash 铺量/做梦 + MiniMax M3 合成/多模态) — Opus 座舱下的引擎配置',
     env: {
       // OMD_RUNTIME 保留作 conductor 兜底坐标 (掌舵实为 Opus; runtime 非独立大脑)。
       OMD_RUNTIME_PROVIDER: 'kimi-coding',
@@ -232,20 +241,20 @@ export const ROLE_PRESETS: readonly RolePreset[] = [
       OMD_CONDUCTOR_ESCALATION_MODEL: KIMI_CODING_K3,
       // judge 择优 = kimi k3
       OMD_JUDGE_MODEL: KIMI_CODING_K3,
-      // synth 归约/综合 = mimo ultraspeed
-      OMD_REDUCE_MODEL: MIMO_ULTRASPEED,
-      OMD_REASON_MODEL: MIMO_ULTRASPEED,
+      // synth 归约/综合 = MiniMax M3
+      OMD_REDUCE_MODEL: MINIMAX_M3,
+      OMD_REASON_MODEL: MINIMAX_M3,
       // fleet(leaf) 铺量执行 = ds-flash (inproc leaf / own-loop agent / 镜头)
       OMD_CG_LEAF_MODEL: DS_FLASH,
       OMD_ITER_LEAF_MODEL: DS_FLASH,
       OMD_CG_AGENT_MODEL: DS_FLASH,
       OMD_ITER_AGENT_MODEL: DS_FLASH,
       OMD_LENS_MODEL: DS_FLASH,
-      // inproc bandit 池 (ROUTER-5 成本 reward): pool[0]=ds-flash 保静态默认, mimo 竞争者 —
+      // inproc bandit 池 (ROUTER-5 成本 reward): pool[0]=ds-flash 保静态默认, M3 竞争者 —
       // 学"过闸最省"。agent (改文件) 不开池, 保 ds-flash 确定性。
-      OMD_ROUTER_POOL_INPROC: `${DS_FLASH},${MIMO_25}`,
+      OMD_ROUTER_POOL_INPROC: `${DS_FLASH},${MINIMAX_M3}`,
     },
-    multimodalPool: [MIMO_25],
+    multimodalPool: [MINIMAX_M3],
     // canonical config 角色 (role-models.ts MODEL_ROLES): conductor/leaf/verifier。
     // verifier 默认 k3 (Nick: k3 或 codex; k3 与掌舵同源, codex 为跨家族避盲点备选)。
     configRoles: [
@@ -255,11 +264,45 @@ export const ROLE_PRESETS: readonly RolePreset[] = [
     ],
     // kimi-coding 走 pi 通道 (auth.json api_key 或 OAuth) — 免 env key, 就绪判定走 auth.json。
     oauthProviders: ['kimi-coding'],
+    customApis: [MINIMAX_API],
     keyPrompts: [
       { env: 'DEEPSEEK_API_KEY', label: 'DeepSeek API key (fleet 执行)', provider: 'deepseek' },
-      { env: 'MIMO_API_KEY', label: 'MiMo API key (synth 合成 + 多模态池)', provider: 'mimo' },
+      MINIMAX_KEY_PROMPT,
       // kimi-coding 走 auth.json (api_key/OAuth), 免 env key → 不入 keyPrompts。
     ],
+  },
+  {
+    // ⓪ 生产档 m3-codex (2026-09-11, 与本仓 .omd/config.json 同款): M3 坐 conductor / worker / 合成
+    //   全部高频座 (便宜、原生多模态、1M 上下文); 终审 verifier / review 坐 ChatGPT 订阅的 gpt-5.6-sol
+    //   (与 M3 异族, 判与证不共享盲点); escalation 坐 Claude 订阅的 opus-5 (owner 2026-09-11 裁)。
+    //   两条订阅通道都免 env key: codex 走 pi OAuth (omd /login), claude-code 走 claude CLI 登录。
+    id: 'm3-codex',
+    label: '生产档 (MiniMax M3 掌舵/干活 + ChatGPT 订阅 sol 终审 + Claude 订阅 opus 升级) — 一把 MINIMAX_API_KEY + 两个订阅登录',
+    env: {
+      OMD_RUNTIME_PROVIDER: 'minimax-cn',
+      OMD_RUNTIME_MODEL: 'MiniMax-M3',
+      OMD_CG_CONDUCTOR_MODEL: MINIMAX_M3,
+      OMD_ITER_CONDUCTOR_MODEL: MINIMAX_M3,
+      OMD_CG_LEAF_MODEL: MINIMAX_M3,
+      OMD_ITER_LEAF_MODEL: MINIMAX_M3,
+      OMD_CG_AGENT_MODEL: MINIMAX_M3,
+      OMD_ITER_AGENT_MODEL: MINIMAX_M3,
+      OMD_LENS_MODEL: MINIMAX_M3,
+      OMD_REDUCE_MODEL: MINIMAX_M3,
+      OMD_REASON_MODEL: MINIMAX_M3,
+      OMD_JUDGE_MODEL: CODEX_SOL,
+      OMD_REVIEW_SPEC_MODEL: CODEX_SOL,
+      OMD_CONDUCTOR_ESCALATION_MODEL: CLAUDE_OPUS,
+    },
+    multimodalPool: [MINIMAX_M3],
+    configRoles: [
+      { role: 'conductor', coord: MINIMAX_M3 },
+      { role: 'leaf', coord: MINIMAX_M3 },
+      { role: 'verifier', coord: CODEX_SOL },
+    ],
+    customApis: [MINIMAX_API],
+    oauthProviders: ['openai-codex'],
+    keyPrompts: [MINIMAX_KEY_PROMPT],
   },
 ];
 
