@@ -72,7 +72,9 @@ export function parseAgyStream(lines: Iterable<string>): AgyParsed {
     let e: AgyStreamEvent;
     try {
       e = JSON.parse(l) as AgyStreamEvent;
-    } catch {
+    } catch (err) {
+      // 以 `{` 开头却不是 JSON: agy 偶发的提示行。跳过但留原文头 (§静默坑 2), 别让一条坏行悄悄吞掉一个工具步。
+      logger.debug({ head: l.slice(0, 120), err: err instanceof Error ? err.message : String(err) }, '[agy-leaf] 非 JSON 行跳过');
       continue;
     }
     if (e.event === 'result' && e.result) {
@@ -167,8 +169,9 @@ function statSafe(root: string, rel: string): string {
   try {
     const s = require('node:fs').statSync(resolve(root, rel)) as { mtimeMs: number; size: number };
     return `${s.size}@${Math.round(s.mtimeMs)}`;
-  } catch {
-    return 'gone';
+  } catch (err) {
+    // 文件在快照之间被删了也是一种「碰过」; 原文进指纹, diskDeltaPaths 照样能看出变化。
+    return `gone (${err instanceof Error ? err.message.slice(0, 60) : String(err)})`;
   }
 }
 

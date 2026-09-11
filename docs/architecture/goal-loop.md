@@ -20,6 +20,10 @@ One call, two answers (`src/harness/goal/classify-acceptance.ts`):
 
 - **cost tier** — how much machinery this goal deserves;
 - **acceptance kind** — `executable` (a command plus the exit code that counts as success)
+  — for web repos (an `index.html` entry plus a usable chromium) the classifier may hand back a declarative
+  `web_oracle` spec instead of a command; the engine materializes it to `.omd/acceptance/web-oracle.json`,
+  freezes it before the first dispatch, and the command becomes `bun run <engine>/scripts/web-oracle.ts <spec>`
+  (a real browser drives the page and asserts DOM state — see `docs/plan/2026-09-11-web-oracle-执行契约.md`)
   or `exploratory` (no machine criterion; a learning goal plus an affordable loss).
 
 The axes are independent on purpose, and forcing the tier deliberately does **not** override

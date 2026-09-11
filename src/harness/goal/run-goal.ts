@@ -2192,13 +2192,6 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
         loopLedger.criterionAuthor = { attempted: true, accepted: false, why: `出题者抛错: ${String(err).slice(0, 240)}` };
       }
     }
-    // Web oracle 预冻结 (契约 D-3): spec 在分类期已物化 ⇒ `missingPathArgs` 看它「已存在」不会冻, 于是按 R4 同款
-    // 在派发前冻上 (frozenAtDispatch 0): worker 改判据 = 移球门, 工具面当场拒。
-    if (loopPlan !== undefined && classified.webOracle?.path && !loopLedger.criterionFreeze) {
-      const f = classified.webOracle.path;
-      loopLedger.criterionFreeze = { files: [f], frozenAtDispatch: 0, hashes: { [f]: hashArtifact(join(config.cwd, f)) } };
-      logger.info({ file: f }, '[run-goal] web oracle spec 已冻结 (frozenAtDispatch 0) → 执行侧只能让页面过它');
-    }
     const authored = loopLedger.criterionAuthor;
     if (authored?.accepted && authored.files?.length) {
       // D-5 冻结: `frozenAtDispatch: 0` = 任何派发之前就冻上了。`initFreezeState` 从 `hashes` 恢复
@@ -2208,6 +2201,14 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
       loopLedger.criterionFreeze = { files: [...authored.files], frozenAtDispatch: 0, hashes };
       logger.info({ model: authored.model, hashes }, '[run-goal] R4 异族座判据已冻结 (frozenAtDispatch 0) → 执行侧只能让它过');
     }
+  }
+  // Web oracle 预冻结 (契约 D-3, 2026-09-11): spec 在分类期已物化 ⇒ loop-run 的 `missingPathArgs` 看它「已存在」不会冻,
+  // 于是按 R4 同款在派发前冻上 (frozenAtDispatch 0): worker 改判据 = 移球门, 工具面当场拒。
+  // ⚠ 放在 R4 那个 `OMD_CRITERION_AUTHOR === 'cross'` 块**外面** —— 首版放在里面, 默认关的开关让它一次也没跑 (活体探针 0ac9c5c0 日志无冻结行)。
+  if (loopPlan !== undefined && classified.webOracle?.path && !loopLedger.criterionFreeze) {
+    const f = classified.webOracle.path;
+    loopLedger.criterionFreeze = { files: [f], frozenAtDispatch: 0, hashes: { [f]: hashArtifact(join(config.cwd, f)) } };
+    logger.info({ file: f }, '[run-goal] web oracle spec 已冻结 (frozenAtDispatch 0) → 执行侧只能让页面过它');
   }
   let exec: ExecutorDagResult;
   /** P3 S6b: 循环路径第二跑 (D-14 回灌) 的 config 基座 = 第一跑的 execCfg (含 freezeCriterion.waiveRed 等), 不是裸 config.dag。 */

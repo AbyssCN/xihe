@@ -271,7 +271,8 @@ const WEB_ENTRY_CANDIDATES = ['index.html', 'public/index.html', 'src/index.html
 function enginePlaywrightResolvable(): boolean {
   try {
     return typeof import.meta.resolve('playwright-core') === 'string';
-  } catch {
+  } catch (err) {
+    logger.debug({ err: err instanceof Error ? err.message : String(err) }, '[env-facts] playwright-core 解析不到 → web oracle 不可用');
     return false;
   }
 }
@@ -283,8 +284,10 @@ export function probeWebFacts(root: string, env: Record<string, string | undefin
   let hasChromium = false;
   try {
     hasChromium = existsSync(browsersDir) && readdirSync(browsersDir).some((d) => d.startsWith('chromium'));
-  } catch {
-    hasChromium = false; // 目录读不动 = 没浏览器 (fail-closed: 判据写了也跑不起来)
+  } catch (err) {
+    // 目录读不动 = 没浏览器 (fail-closed: 判据写了也跑不起来); 原文留一行 (§静默坑 2)。
+    logger.debug({ browsersDir, err: err instanceof Error ? err.message : String(err) }, '[env-facts] 浏览器目录读不动 → web oracle 不可用');
+    hasChromium = false;
   }
   return { entry, playwright: hasChromium && enginePlaywrightResolvable(), browsersDir };
 }
