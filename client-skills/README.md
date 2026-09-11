@@ -26,7 +26,7 @@ cd <目标repo> && claude mcp add omd -- omd mcp        # 全局安装的 omd; �
 |---|---|---|
 | `/omd-path` | 开/建/列 pathfinder 决策地图 + 开票 + 预取 | MCP `map_open` `map_add` `map_prefetch` |
 | `/omd-ui-reviewer` | 看渲染截图判 UI(层级/间距/可读性/状态/一致性/slop);design-review profile 的可移植兜底审核 skill | 纯方法论,无 MCP 依赖 |
-| `/omd-docs-drift` | 文档漂移追踪:按声明表裁「文档↔变更源」对,语义半闸出 suggested 票 | MCP `dag_run`(Sonnet 座逐对判) |
+| `/omd-docs-drift` | 文档漂移追踪:按声明表裁「文档↔变更源」对,语义半闸出 suggested 票 | MCP `run`(Sonnet 座逐对判) |
 | `/omd-tickets` | 看前沿 + 拉 AFK 研究回流(预算内自续) | MCP `map_tickets` |
 | `/omd-rule` | 裁决前沿票 + 终裁判定树(真源三层/灰态三画法/敏感清单) | MCP `map_rule` |
 | `/omd-deliver` | **权力闸**:执行已散尽区域 + delivered✅≠东西真在核对 | MCP `map_deliver` |

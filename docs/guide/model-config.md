@@ -16,19 +16,19 @@ per-node path, and the engine-default path all resolve a seat to the same coordi
 ```json
 {
   "models": {
-    "conductor": "openai-codex:gpt-5.6-sol",
-    "leaf":      "mimo:mimo-v2.5",
-    "agent":     "mimo:mimo-v2.5-pro",
+    "conductor": "minimax-cn:MiniMax-M3",
+    "leaf":      "minimax-cn:MiniMax-M3",
+    "agent":     "minimax-cn:MiniMax-M3",
     "judge":     "openai-codex:gpt-5.6-sol",
-    "reason":    "kimi-coding:k3",
-    "verifier":  "opencode-go:glm-5.2",
-    "reduce":    "mimo:mimo-v2.5-pro",
-    "lens":      "mimo:mimo-v2.5-pro",
-    "expand":    "mimo:mimo-v2.5-pro",
-    "distill":   "mimo:mimo-v2.5-pro",
-    "overflow":  "mimo:mimo-v2.5-pro",
-    "escalation":"openai-codex:gpt-5.6-sol",
-    "review-spec":"opencode-go:glm-5.2"
+    "reason":    "minimax-cn:MiniMax-M3",
+    "verifier":  "openai-codex:gpt-5.6-sol",
+    "reduce":    "minimax-cn:MiniMax-M3",
+    "lens":      "minimax-cn:MiniMax-M3",
+    "expand":    "minimax-cn:MiniMax-M3",
+    "distill":   "minimax-cn:MiniMax-M3",
+    "overflow":  "minimax-cn:MiniMax-M3",
+    "escalation":"claude-code:claude-opus-5",
+    "review-spec":"openai-codex:gpt-5.6-sol"
   }
 }
 ```
@@ -90,7 +90,7 @@ answer: **verify** (a checker from the author's own family shares its blind spot
 | `review-spec` | verify | Spec/contract review | Mid · cross-family | Same cross-family rule. |
 | `review` | verify | `dag_review`'s find axis: adversarial code reading | **Strong** · cross-family | Sparse, human-triggered; strong + off the author's family. |
 
-**Why most worker seats land on one cheap model (e.g. `mimo-v2.5-pro`)** — the six worker seats are
+**Why most worker seats land on one cheap model (e.g. `MiniMax-M3`)** — the six worker seats are
 the highest-frequency traffic. Auto-assign keeps them on a big-quota **flat/prepaid** channel because
 scattering them onto a shared-dollar pool burns money fast (Kimi K3 drains the shared bucket ~288×
 faster than a prepaid one — which is exactly why the *brain* seats get a dedicated prepaid bucket, not
@@ -99,15 +99,17 @@ the oracle (tsc/test/verifier), not by the model family**, and eval showed cheap
 not divergence. So one capable cheap model across the worker bucket is the right call; spreading it
 across families buys nothing and costs money.
 
-**The distribution is already multi-family across *roles*:** GPT (brain: conductor/judge/escalation) ·
-Kimi K3 (reason) · GLM-5.2 (verify, deliberately off the author's family) · MiMo (workers). Mono-family
-only *within* the worker bucket, by design.
+**The distribution is already multi-family across *roles*:** MiniMax M3 (conductor + workers) ·
+GPT-5.6-sol via the ChatGPT subscription (judge / verifier / review-spec, deliberately off the author's family) ·
+Claude Opus 5 via the Claude subscription (escalation). Mono-family only *within* the conductor+worker bucket,
+by design — the 2026-09 code80 arms showed the conductor seat is not the reward lever (see
+`runs/2026-09-05-conductor-seat-arms.md`), so it sits with the workers on the cheap prepaid channel.
 
 **The one seat where more diversity genuinely pays: `lens`.** Research lenses are multiple *viewpoints*.
 The repo's own rule — "three research lenses on one family share its blind spots" — means mono-family
 lenses are multi-prompt but single-mind. Spreading the lens/cheap pool across families
-(MiMo + GLM + Qwen + Kimi) so the stamp pass's sibling-spread rotates each lens onto a different family
-would improve real divergence. `reduce → deepseek` instead of MiMo is marginal by comparison (reduce is
+(MiniMax + GLM + Qwen + Kimi) so the stamp pass's sibling-spread rotates each lens onto a different family
+would improve real divergence. `reduce → deepseek` instead of MiniMax is marginal by comparison (reduce is
 a mechanical fold, and it is high-frequency, so it stays on the cheap prepaid bucket).
 
 ## 2 · Provider catalog — where a model lives

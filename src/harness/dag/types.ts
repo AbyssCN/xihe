@@ -103,7 +103,7 @@ export type GenerateFn = (req: {
  */
 /** 模型座位 seam: 引擎各角色绑哪个模型坐标。装配层由座位表 (src/model/seats.ts) 解析注入。 */
 export interface DagSeatsSeam {
-  /** conductor 模型 'provider:modelId' (规划用, 我们=mimo:mimo-v2.5-pro)。**必填, 无硬默认。** */
+  /** conductor 模型 'provider:modelId' (规划用, 我们=minimax-cn:MiniMax-M3)。**必填, 无硬默认。** */
   conductorModel: string;
   /** inproc leaf 模型 'provider:modelId' (生成/判断单发)。**必填, 无硬默认** —— 装配层由 'leaf' 座位解析。 */
   leafModel: string;

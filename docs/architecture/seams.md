@@ -15,7 +15,7 @@
 
 | 字段 | 必填 | 类型 | 一句话 | 消费方 (前3) |
 |---|---|---|---|---|
-| `conductorModel` | **是** | `string` | conductor 模型 'provider:modelId' (规划用, 我们=mimo:mimo-v2.5-pro)。 | `src/mcp/tools/dag-tools.ts`<br>`src/harness/dag/engine.ts`<br>`src/harness/goal/loop-run.ts` (19 文件) |
+| `conductorModel` | **是** | `string` | conductor 模型 'provider:modelId' (规划用, 我们=minimax-cn:MiniMax-M3)。 | `src/mcp/tools/dag-tools.ts`<br>`src/harness/dag/engine.ts`<br>`src/harness/goal/loop-run.ts` (19 文件) |
 | `leafModel` | **是** | `string` | inproc leaf 模型 'provider:modelId' (生成/判断单发)。 | `src/mcp/tools/dag-tools.ts`<br>`src/harness/dag/engine.ts`<br>`src/eval/oracles/fullstack-dag.ts` (13 文件) |
 | `agentLeafModel` |  | `string` | agent leaf 模型 (带工具改文件)。 | `src/mcp/tools/dag-tools.ts`<br>`src/mcp/tools/pathfinder.ts`<br>`src/harness/dag/engine.ts` (10 文件) |
 | `conductorEscalationModel` |  | `string` | conductor 升级模型 'provider:modelId' (verifier fail 时用更强模型重规划重跑)。 | `src/harness/dag/engine.ts`<br>`src/harness/execute-slice.ts`<br>`src/mcp/assemble.ts` (6 文件) |

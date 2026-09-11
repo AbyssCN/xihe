@@ -1,6 +1,6 @@
 ---
 name: omd-docs-drift
-description: 文档漂移追踪:确定性死路径/死锚闸(bun test 常驻)之外的语义半——按 docs/docs-map.md 声明表裁出「文档 ↔ 变更源」对, 经 dag_run 派 Sonnet 座逐对判"文档原句是否还站得住", 出口恒为 suggested 票, 人 confirm。Trigger:/omd-docs-drift、查文档漂移、文档跟没跟上代码、docs drift。
+description: 文档漂移追踪:确定性死路径/死锚闸(bun test 常驻)之外的语义半——按 docs/docs-map.md 声明表裁出「文档 ↔ 变更源」对, 经 run (旧名 dag_run) 派 Sonnet 座逐对判"文档原句是否还站得住", 出口恒为 suggested 票, 人 confirm。Trigger:/omd-docs-drift、查文档漂移、文档跟没跟上代码、docs drift。
 ---
 
 # /omd-docs-drift — 语义文档漂移审计
@@ -30,9 +30,9 @@ bun run scripts/docs-drift.ts plan
 
 零任务 → 打印「无待审对」, 到此为止, 不必往下走。
 
-### 2. dag_run —— 每对一个便宜叶
+### 2. run —— 每对一个便宜叶
 
-对 plan 打印的每一条 task(`{doc, sourceGlobs, anchors, changedFiles}`)派**一个平铺 dag_run 节点**
+对 plan 打印的每一条 task(`{doc, sourceGlobs, anchors, changedFiles}`)派**一个平铺 run 节点**(`run` 工具, 旧名 `dag_run` 仍是别名)
 (Sonnet 座, 便宜档), task 按下面模板填:
 
 ```
