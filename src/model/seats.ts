@@ -112,7 +112,7 @@ export const SEATS: readonly SeatSpec[] = [
     crossFamily: 'preferred',
     thinking: 'high',
     sampling: {},
-    recommend: '同 conductor 或更强 —— 它存在的意义就是"上一个不够好"。',
+    recommend: '同 conductor 或更强 —— 它存在的意义就是"上一个不够好"。本仓生产 (owner 2026-09-11 裁) 坐 claude-code:claude-opus-5 (Claude 订阅 SDK 通道, 与 M3 conductor 异族; 频次低, 撞 session limit 概率小, 撞上按「不升级维持原 conductor」) —— 写在 .omd/config.json; 这里的首选仍是 codex sol, 因为 auto-assign 面向没有 Claude 订阅的用户。',
     preferredCoord: 'openai-codex:gpt-5.6-sol',
   },
 

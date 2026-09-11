@@ -63,6 +63,7 @@
     "omd-path": "bun run scripts/omd-path.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "seat-check": "bun run scripts/seat-check.ts --quiet",
     "test:full": "bun run scripts/test-run-triage.ts --run",
     "dag-deepen": "bun run scripts/dag-deepen.ts",
     "dag-slim": "bun run scripts/dag-slim.ts",
