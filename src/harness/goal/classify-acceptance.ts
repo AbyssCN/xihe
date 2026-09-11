@@ -49,6 +49,7 @@ import {
   surveyHits,
 } from './criterion-consensus';
 import { unionCriterionCommands, type ConsensusWithUnion } from './criterion-union';
+import { parseWebOracleSpec, webOracleCommand, webOracleTeaching, type WebOracleSpec } from './web-oracle';
 import { SPEC_PACK_HEADER } from './spec-pack';
 import { tryResolveSeatModel } from '../../model/role-models';
 import { effectiveSeatSampling } from '../../model/seat-overrides';
@@ -98,6 +99,8 @@ export interface GoalClassification {
   acceptance: AcceptanceSpec;
   /** 见 {@link NegativeSample}。缺席 = 分类器没给(探针跳过,fail-open)。 */
   negativeSample?: NegativeSample;
+  /** Web oracle 已物化的 spec 相对路径 (契约 D-3); run-goal 据此预冻结 (frozenAtDispatch 0)。 */
+  webOracle?: { path: string };
   /** 见 {@link AcceptanceProbe}。缺席 = 没探 / 没记录。 */
   acceptanceProbe?: AcceptanceProbe;
   /**
@@ -137,6 +140,8 @@ interface RawClassification {
   tier?: unknown;
   acceptance_kind?: unknown;
   command?: unknown;
+  /** Web oracle (2026-09-11): 分类器给的声明式 spec 原样 —— 形状闸 parseWebOracleSpec 在 normalize 里做。 */
+  web_oracle?: unknown;
   /** F2 第三格:分类器给的 checklist 原样 —— 形状校验在 normalizeClassification 里做。 */
   checklist?: unknown;
   learning_goal?: unknown;
@@ -162,7 +167,10 @@ interface RawClassification {
  * 给 `opts.root` → 闸走 `allowlistForRoot(root)` + 语言一致闸(与 acceptance 闸同源),
  * Python 仓写 `bun test` 在此拒; 不给 → 退回 base 白名单(既有调用零改动即绿, INV-6 / INV-11)。
  */
-export function normalizeClassification(raw: RawClassification, opts?: AcceptanceCommandBlockOpts): GoalClassification {
+/** normalize 的额外接缝: web oracle 物化器 (契约 D-3)。缺席 = 分类器给了 web_oracle 也只能降级 (留原话)。 */
+export type NormalizeOpts = AcceptanceCommandBlockOpts & { materializeWebOracle?: (spec: WebOracleSpec) => string };
+
+export function normalizeClassification(raw: RawClassification, opts?: NormalizeOpts): GoalClassification {
   // P3 S7: route 槽与另两条轴同一发出, 归一化在这一层套上 —— 各分支 (执行型 / rubric / 探索型 / 降级) 一个都不漏。
   // 缺席 → none (不留证据行: 缺席是老输出的常态, 不是越界); 在场 → parseRouteRaw 钳 + 越界留证据 (INV-6)。
   const route: RouteDecision =
@@ -172,12 +180,30 @@ export function normalizeClassification(raw: RawClassification, opts?: Acceptanc
   return { ...normalizeAxes(raw, opts), route };
 }
 
-function normalizeAxes(raw: RawClassification, opts?: AcceptanceCommandBlockOpts): GoalClassification {
+function normalizeAxes(raw: RawClassification, opts?: NormalizeOpts): GoalClassification {
   const tier: GoalTier = String(raw.tier ?? '').toLowerCase().includes('simple') ? 'simple' : 'complex';
   const kind = String(raw.acceptance_kind ?? '').toLowerCase();
 
   if (kind.includes('exec')) {
-    const command = typeof raw.command === 'string' ? raw.command.trim() : '';
+    let command = typeof raw.command === 'string' ? raw.command.trim() : '';
+    let webOracle: { path: string } | undefined;
+    // Web oracle (2026-09-11, 契约 D-1/D-3): 分类器给的是声明式 spec, 命令由引擎生成。形状闸拒 / 没有物化器
+    // → 降级探索型并留原话 (INV-6, 与「命令不可跑」同款), 不让一个判不了的执行型留在环里。
+    if (raw.web_oracle !== undefined && raw.web_oracle !== null) {
+      const parsed = parseWebOracleSpec(raw.web_oracle);
+      if (!parsed.ok) {
+        logger.warn({ reason: parsed.reason }, '[omd/goal] 判执行型 + web_oracle 但 spec 形状不合法 → 降级探索型');
+        return { tier, acceptance: fallbackExploratory(`执行型 web_oracle 不可用 — ${parsed.reason}`), acceptanceProbe: { kind: 'demoted', why: parsed.reason } };
+      }
+      if (!opts?.materializeWebOracle) {
+        const why = 'web_oracle 无物化器 (分类未带仓根) —— spec 无处落盘';
+        logger.warn({}, `[omd/goal] ${why} → 降级探索型`);
+        return { tier, acceptance: fallbackExploratory(`执行型 web_oracle 不可用 — ${why}`), acceptanceProbe: { kind: 'demoted', why } };
+      }
+      const rel = opts.materializeWebOracle(parsed.spec);
+      command = webOracleCommand(rel);
+      webOracle = { path: rel };
+    }
     const blocked = acceptanceCommandBlockReason(command, opts);
     if (blocked) {
       logger.warn({ command, blocked }, '[omd/goal] 判执行型但验收命令跑不起来 → 降级探索型 (D-I)');
@@ -202,6 +228,7 @@ function normalizeAxes(raw: RawClassification, opts?: AcceptanceCommandBlockOpts
       tier,
       acceptance: { kind: 'executable', command, expectExit: 0 },
       ...(nPath && nBody.trim() ? { negativeSample: { path: nPath, content: nBody } } : {}),
+      ...(webOracle ? { webOracle } : {}),
     };
   }
 
@@ -491,6 +518,8 @@ export function classifyPrompt(goal: string, probe?: ClassifyPromptProbe): strin
     '',
     '判断二 `acceptance_kind` (判据轴 — **成没成怎么判**):',
     '  "executable"  = 成败机器可判。**必须**同时给 `command`: 一条别人来跑、退出码 0 即算达成的命令。',
+    // Web oracle 教学 (契约 D-4 / INV-5): 只在 Web 仓 ∧ 浏览器可用时出现; 否则这一发逐字节同旧。
+    ...(probe?.envFacts?.web?.entry && probe.envFacts.web.playwright ? webOracleTeaching(probe.envFacts.web.entry) : []),
     '  "rubric"      = 没有可跑的命令, 但产物好坏**能被人逐条说清** (报告 / 设计 / 文档 / 调研)。',
     '                  给 `checklist`: 一个数组, 每条 {"id":稳定短 id, "requirement":一句可判 yes/no 的要求}。',
     '                  ⚠ 它在你动手之前就冻结, 之后改一个字都会被拒 —— 所以现在就要写得判得动。',
@@ -581,6 +610,7 @@ export function classifyPrompt(goal: string, probe?: ClassifyPromptProbe): strin
     '',
     '形状: {"tier":"simple"|"complex","acceptance_kind":"executable"|"rubric"|"exploratory",',
     '       "command"?:string,"negative_sample_path"?:string,"negative_sample_content"?:string,',
+    ...(probe?.envFacts?.web?.entry && probe.envFacts.web.playwright ? ['       "web_oracle"?:{"entry":string,"steps":[{…}]},'] : []),
     '       "checklist"?:[{"id":string,"requirement":string}],',
     '       "learning_goal"?:string,"affordable_loss"?:string,',
     '       "route"?:{"kind":"none"}|{"kind":"chain","chain":{"stages":[{"id":string,"word":string,"goal"?:string,"command"?:string}]}}}',
@@ -649,9 +679,11 @@ async function classifyGoalCore(
      * 缺席 / 空串 ⇒ 那一发的 prompt 与加这一段之前逐字相同。
      */
     survey?: string;
+    /** Web oracle 物化器 (契约 D-3): 把分类器给的 spec 写进仓, 返回相对路径。缺席 = web_oracle 分型只能降级。 */
+    materializeWebOracle?: (spec: WebOracleSpec) => string;
   },
 ): Promise<GoalClassification> {
-  const { generate, model, runCommand, repoRoot, survey } = deps;
+  const { generate, model, runCommand, repoRoot, survey, materializeWebOracle } = deps;
   if (!generate || !model) {
     return {
       tier: 'complex',
@@ -679,7 +711,7 @@ async function classifyGoalCore(
     repoRoot || survey
       ? { ...(repoRoot ? { repoRoot } : {}), ...(envFacts ? { envFacts } : {}), ...(survey ? { survey } : {}) }
       : undefined;
-  const blockOpts: AcceptanceCommandBlockOpts = repoRoot ? { root: repoRoot, ...(envFacts ? { envFacts } : {}) } : {};
+  const blockOpts: NormalizeOpts = { ...(repoRoot ? { root: repoRoot, ...(envFacts ? { envFacts } : {}) } : {}), ...(materializeWebOracle ? { materializeWebOracle } : {}) };
 
   // `seat` 只在三候选共识那条路上给 (D-1 的异族座那一发); 省略 = conductor 座, 与共识关闭时逐字相同。
   const ask = async (correction: string, seat?: string): Promise<GoalClassification> => {

@@ -34,6 +34,7 @@ import {
 import { logger } from '../logger';
 import { languageConsistencyFromFacts } from '../env-facts';
 import { ensureNodeModulesLink } from '../run-worktree';
+import { isWebOracleCommand, webOracleCommandBlockReason } from './web-oracle';
 
 /**
  * 分类器给的**反面样本**:一份**明显错**的产物长什么样(G4, 2026-07-31)。
@@ -265,6 +266,10 @@ export function acceptanceCommandBlockReason(command: string, opts: AcceptanceCo
   const c = command.trim();
   if (!c) return '[blocked empty: 验收命令为空]';
   const root = opts.root;
+  // Web oracle (2026-09-11, 契约 D-2): 命令是**引擎**写的 (bun run <engine>/scripts/web-oracle.ts <spec>), 不是模型写的 ——
+  // 语言一致 / 白名单 / 路径参数三道对它不成立 (纯 html 仓没有 js 语言证据会把 `bun` 判成 lang-mismatch;
+  // 脚本路径在引擎目录不在仓里)。它自己的闸只问一件事: spec 物化了没有。反向自检: acceptance-gate.test.ts「web oracle 命令」。
+  if (isWebOracleCommand(c)) return webOracleCommandBlockReason(c, root);
   if (!root) return commandBlockReason(c, DEFAULT_COMMAND_ALLOWLIST);
   // 给了真探测结果 → 三道全走, 只是**语言一致那道换了证据源**: 从"根下有没有那个打包文件"
   // 换成"实测哪门语言启用"。marker 版会把「有 137 个 .py 但没有 pyproject.toml」的仓判成

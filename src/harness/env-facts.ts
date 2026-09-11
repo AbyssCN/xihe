@@ -31,6 +31,7 @@
  * · marker 表仍是 `command-leaf.LANGUAGE_PACKS` 那一份(单源),本模块**不抄第二份**。
  */
 import { existsSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { LANGUAGE_PACKS, allowlistForRoot } from './command-leaf';
 import { logger } from './logger';
@@ -56,9 +57,21 @@ export interface LanguageEvidence {
   why: string;
 }
 
+/** Web 页面仓事实 (2026-09-11, web oracle 契约 D-4)。 */
+export interface WebFacts {
+  /** 入口 html 相对仓根 (按 index.html / public/index.html / src/index.html / dist/index.html 顺序取第一个在的); 没有 = null。 */
+  entry: string | null;
+  /** 引擎自带的 playwright-core 可解析 ∧ chromium 目录在 (PLAYWRIGHT_BROWSERS_PATH 或 ~/.cache/ms-playwright)。 */
+  playwright: boolean;
+  /** 判定用的浏览器目录 (playwright=false 时也给, 便于报「装到哪」)。 */
+  browsersDir: string;
+}
+
 export interface EnvFacts {
   root: string;
   languages: LanguageEvidence[];
+  /** Web 页面仓事实; 缺席只发生在老快照 / 测试夹具, 消费侧一律 `?.`。 */
+  web?: WebFacts;
   /** 已启用语言的验证 bin 并集 (只含 PATH 上真有的)。 */
   enabledBins: string[];
   /** 按证据推的验收命令候选, 强证据在前。空 = 探不出, 消费者别硬凑。 */
@@ -245,10 +258,35 @@ export function probeEnvFacts(root: string, env: Record<string, string | undefin
   return {
     root,
     languages,
+    web: probeWebFacts(root, env),
     enabledBins,
     testCommandCandidates: [...new Set(testCommandCandidates)],
     scanned: { files: scan.files, dirs: scan.dirs, truncated: scan.truncated, unreadable: scan.unreadable },
   };
+}
+
+const WEB_ENTRY_CANDIDATES = ['index.html', 'public/index.html', 'src/index.html', 'dist/index.html', 'www/index.html'];
+
+/** playwright-core 从**引擎**的依赖解析 (目标仓不必装); 缺 → false, 不抛。 */
+function enginePlaywrightResolvable(): boolean {
+  try {
+    return typeof import.meta.resolve('playwright-core') === 'string';
+  } catch {
+    return false;
+  }
+}
+
+/** Web 页面仓事实 (契约 D-4)。零 LLM; 只看盘。 */
+export function probeWebFacts(root: string, env: Record<string, string | undefined> = process.env): WebFacts {
+  const entry = WEB_ENTRY_CANDIDATES.find((rel) => existsSync(join(root, rel))) ?? null;
+  const browsersDir = env.PLAYWRIGHT_BROWSERS_PATH?.trim() || join(env.HOME || homedir(), '.cache', 'ms-playwright');
+  let hasChromium = false;
+  try {
+    hasChromium = existsSync(browsersDir) && readdirSync(browsersDir).some((d) => d.startsWith('chromium'));
+  } catch {
+    hasChromium = false; // 目录读不动 = 没浏览器 (fail-closed: 判据写了也跑不起来)
+  }
+  return { entry, playwright: hasChromium && enginePlaywrightResolvable(), browsersDir };
 }
 
 /**
@@ -294,7 +332,11 @@ export function languageConsistencyFromFacts(command: string, facts: EnvFacts): 
 /** 给 prompt 用的一段人话事实。空仓 → 明说"探不出", 不编。 */
 export function renderEnvFacts(f: EnvFacts): string {
   if (f.languages.length === 0) {
-    return `仓环境探测 (${f.root}): 没有检出任何已知语言的证据${f.scanned.truncated ? ' (扫描被上限截断, 结论可能不全)' : ''}。`;
+    const head = `仓环境探测 (${f.root}): 没有检出任何已知语言的证据${f.scanned.truncated ? ' (扫描被上限截断, 结论可能不全)' : ''}。`;
+    // 纯 html 仓正是这一格 (零 js 语言证据): web 事实照报, 否则分类器读到「没有任何证据」就往 exploratory 靠。
+    return f.web?.entry
+      ? `${head}\n  · web: 入口 \`${f.web.entry}\`; 浏览器 ${f.web.playwright ? '可用 (chromium 在)' : `不可用 (${f.web.browsersDir} 无 chromium)`}`
+      : head;
   }
   const lines = [`仓环境探测 (${f.root}, 扫了 ${f.scanned.files} 个文件${f.scanned.truncated ? ', **被上限截断**' : ''}):`];
   for (const l of f.languages) {
@@ -305,5 +347,8 @@ export function renderEnvFacts(f: EnvFacts): string {
       ? `  验收命令候选 (按证据强弱): ${f.testCommandCandidates.map((c) => `\`${c}\``).join(' · ')}`
       : '  验收命令候选: (探不出 —— 别硬凑一条跑不起来的)',
   );
+  if (f.web?.entry) {
+    lines.push(`  · web: 入口 \`${f.web.entry}\`; 浏览器 ${f.web.playwright ? '可用 (chromium 在)' : `不可用 (${f.web.browsersDir} 无 chromium)`}`);
+  }
   return lines.join('\n');
 }

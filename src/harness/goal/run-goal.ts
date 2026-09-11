@@ -35,6 +35,7 @@ import type { ConductorPlan } from '../conductor-plan';
 import type { ExecutorDagResult, LeafResult, DagObservation } from '../dag/types';
 import { judgeRubric, DEFAULT_RUBRIC_MAX_FAILURES } from './rubric-judge';
 import { classifyGoal, renderAcceptance, type AcceptanceSpec, type GoalClassification, type GoalTier } from './classify-acceptance';
+import { writeWebOracleSpec } from './web-oracle';
 import { ignitionPreflight, type FreezeCheckOpts, type ExclusiveLocksOpts } from './ignition-preflight';
 import { releaseDreamLock } from '../dream/trigger';
 import { IgnitionBlockedError } from './ignition-blocked-error';
@@ -1012,9 +1013,10 @@ export const TERMINAL_UNVERIFIED = 'success-unverified';
 /**
  * INV-5 的判据: **这一格是"没接线", 不是"判红"**。
  *
- * `rubricVerdictInputs` 今天无人注入 (生产常态), 于是 rubric 分型恒非 success, 而终态被
- * 折进 `oracle-failed` —— 三批 240 trial 里这一格占 13~20 个/批, 其 reward 均值**高于**整批:
- * 标签与成败零相关。判词与拒因**任一在场**就说明判过了 (判红是判据的正常结论, 不是缺席)。
+ * 历史: `rubricVerdictInputs` 曾无人注入 (2026-08 生产常态), rubric 分型恒非 success, 终态被折进 `oracle-failed`
+ * —— 三批 240 trial 里这一格占 13~20 个/批, 其 reward 均值**高于**整批: 标签与成败零相关。
+ * R-2 (2026-08-30) 起生产在验收时**现算** (`judgeRubric`, 见下方 acceptance.kind === 'rubric' 那段), 注入口只留给测试;
+ * 这一格今天只在判官没产出可用判词时出现。判词与拒因**任一在场**就说明判过了 (判红是判据的正常结论, 不是缺席)。
  */
 export function rubricAcceptanceUnwired(input: {
   kind: AcceptanceSpec['kind'];
@@ -1653,6 +1655,8 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
           repoRoot: config.cwd,
           // 勘察空手 (三段全空) 时不传 —— 那一发的 prompt 与加这一段之前逐字相同 (D-2)。
           ...(surveyForClassify ? { survey: surveyForClassify } : {}),
+          // Web oracle (2026-09-11, 契约 D-3): spec 落到 .omd/acceptance/web-oracle.json, 命令指向引擎 runner。
+          materializeWebOracle: (spec) => writeWebOracleSpec(config.cwd, spec),
         });
       }))(goal);
   // 探针裁决钩子: 分类定稿后恰好调一次 (含 fallback / 探索型), 进 `_runDag` 与任何运行记录之前。
@@ -2187,6 +2191,13 @@ async function runGoalInner(goal: string, config: RunGoalConfig, box: BoardSettl
         logger.warn({ err: String(err) }, '[run-goal] R4 异族出题者抛错 → 退回执行侧自写 (读数记 attempted)');
         loopLedger.criterionAuthor = { attempted: true, accepted: false, why: `出题者抛错: ${String(err).slice(0, 240)}` };
       }
+    }
+    // Web oracle 预冻结 (契约 D-3): spec 在分类期已物化 ⇒ `missingPathArgs` 看它「已存在」不会冻, 于是按 R4 同款
+    // 在派发前冻上 (frozenAtDispatch 0): worker 改判据 = 移球门, 工具面当场拒。
+    if (loopPlan !== undefined && classified.webOracle?.path && !loopLedger.criterionFreeze) {
+      const f = classified.webOracle.path;
+      loopLedger.criterionFreeze = { files: [f], frozenAtDispatch: 0, hashes: { [f]: hashArtifact(join(config.cwd, f)) } };
+      logger.info({ file: f }, '[run-goal] web oracle spec 已冻结 (frozenAtDispatch 0) → 执行侧只能让页面过它');
     }
     const authored = loopLedger.criterionAuthor;
     if (authored?.accepted && authored.files?.length) {

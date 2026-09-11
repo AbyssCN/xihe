@@ -15,6 +15,9 @@
  *  把 `expect` 分支改成恒 ok → 「空壳页面 expect 必红」用例红;去掉 parse 的 expect 检查 → 「无断言拒」红。
  */
 import { z } from 'zod';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const MAX_WAIT_MS = 10_000;
 const DEFAULT_STEP_TIMEOUT_MS = 5_000;
@@ -203,3 +206,60 @@ export function renderWebOracleResult(r: WebOracleResult): string {
 }
 
 export { DEFAULT_STEP_TIMEOUT_MS, MAX_WAIT_MS };
+
+// ── 命令面 (契约 D-2 / D-3): 判据形态仍是 executable, 命令指向引擎自己的 runner ────────────────
+
+/** 引擎内 runner 脚本的绝对路径 (随本模块走, 目标仓无关: 目标仓不必装 playwright)。 */
+export const WEB_ORACLE_SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'scripts', 'web-oracle.ts');
+/** spec 在目标仓里的落点 (相对仓根); 进 1-A 冻结集, worker 改不了球门。 */
+export const WEB_ORACLE_SPEC_REL = '.omd/acceptance/web-oracle.json';
+
+/** 验收命令。`bun` 在命令白名单; `omd` 不在 (owner 2026-07-31 裁), 所以不走 `omd web-oracle`。 */
+export function webOracleCommand(specRel: string = WEB_ORACLE_SPEC_REL): string {
+  return `bun run ${WEB_ORACLE_SCRIPT} ${specRel}`;
+}
+
+/** 这条命令是不是引擎的 web oracle (按脚本路径识别, 不按首词 —— 首词 bun 太泛)。 */
+export function isWebOracleCommand(command: string): boolean {
+  return command.includes('/scripts/web-oracle.ts ');
+}
+
+/** 从命令里取 spec 路径 (脚本后第一个非 flag token); 不是 web oracle 命令 → null。 */
+export function webOracleSpecPathOf(command: string): string | null {
+  if (!isWebOracleCommand(command)) return null;
+  const after = command.split('/scripts/web-oracle.ts ')[1] ?? '';
+  const tok = after.trim().split(/\s+/).find((x) => x && !x.startsWith('--'));
+  return tok ?? null;
+}
+
+/**
+ * 命令闸的 web oracle 分支 (替代语言一致 + 白名单那两道 —— 命令是引擎写的, 不是模型写的):
+ * spec 文件必须已物化在仓内。root 缺席 → 判不了 → 放行 (同 pathArgBlock 的 NULL 口径)。
+ */
+export function webOracleCommandBlockReason(command: string, root: string | undefined): string | null {
+  const rel = webOracleSpecPathOf(command);
+  if (!rel) return '[blocked web-oracle: 命令里没有 spec 路径]';
+  if (!root) return null;
+  if (!existsSync(resolve(root, rel))) return `[blocked web-oracle: spec 未物化 ${rel} (仓根 ${root})]`;
+  return null;
+}
+
+/** 把 spec 写进目标仓 (契约 D-3), 返回相对路径。已存在则覆盖 —— 分类每 run 只跑一次, 覆盖即最新。 */
+export function writeWebOracleSpec(root: string, spec: WebOracleSpec, rel: string = WEB_ORACLE_SPEC_REL): string {
+  const abs = join(root, rel);
+  mkdirSync(dirname(abs), { recursive: true });
+  writeFileSync(abs, `${JSON.stringify(spec, null, 2)}\n`);
+  return rel;
+}
+
+/** 教学面 (契约 D-4): 只在 Web 仓 ∧ 浏览器可用时进 classify prompt。导出供 INV-5 用例做字节对比。 */
+export function webOracleTeaching(entry: string): string[] {
+  return [
+    `⚠ 这个仓是 Web 页面仓 (入口 \`${entry}\`), 且本机有 chromium。**改页面 / 交互 / 数据绑定的目标, 判据轴选 "executable" 并给 \`web_oracle\`** (不要 grep 字符串 —— 空壳页面也能骗过 grep):`,
+    '  "web_oracle": {"entry": 入口 html 相对路径 (或 http 地址), "steps": [按 instruction 做的交互与断言]}',
+    '  steps 动词只许: {"goto":路径} {"click":css} {"fill":{"selector":css,"value":文本}} {"press":键名} {"wait":毫秒≤10000}',
+    '               {"expect":{"selector":css, "text"?:全文, "textContains"?:子串, "visible"?:布尔, "count"?:数量}} {"expectUrl":子串} {"expectNoConsoleErrors":true}',
+    '  至少一条 expect; 断言写目标做完后**才**成立的状态 (点了按钮之后文本变成什么 / 列表有几项), 空壳页面必须过不了。',
+    '  给了 web_oracle 就**不要**再给 command (引擎替你生成); negative_sample_path 可指向入口 html, 内容给一个空壳页面。',
+  ];
+}
