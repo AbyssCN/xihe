@@ -229,6 +229,10 @@ describe("orderByAmortization", () => {
 describe("modelFamily (INV-7/INV-3 家族判定)", () => {
 	test("渠道后缀剥离: kimi-coding→kimi, mimo-platform→mimo", () => {
 		expect(modelFamily("kimi-coding:k3")).toBe("kimi");
+		// agy-cli 是聚合渠道 (2026-09-11): 家族从 modelId 品牌头解析, agy 托管的 Claude 与 claude-code SDK 通道同族。
+		expect(modelFamily("agy-cli:gemini-3.8-flash-high")).toBe("gemini");
+		expect(modelFamily("agy-cli:claude-opus-4-6-thinking")).toBe("claude-code");
+		expect(modelFamily("agy-cli:claude-opus-4-6-thinking")).toBe(modelFamily("claude-code:claude-opus-5"));
 		expect(modelFamily("mimo-platform:mimo-v2.5-pro-ultraspeed")).toBe("mimo");
 		expect(modelFamily("mimo:mimo-v2.5")).toBe("mimo");
 	});

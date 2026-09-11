@@ -20,6 +20,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { assertModelResolvable } from './index';
 import { CLAUDE_SDK_PROVIDER } from './claude-sdk-complete';
+import { AGY_CLI_PROVIDER, agyCredentialed } from './agy-cli-complete';
 import { getProvider, listProviders } from './providers';
 import { piHasCredential } from './pi-transport';
 import { channelInCooldown, inCooldown } from './provider-health';
@@ -45,6 +46,8 @@ export function providerCredentialed(
 
 function credentialed(provider: string, env: Record<string, string | undefined>): boolean {
   if (provider === CLAUDE_SDK_PROVIDER) return claudeSdkCredentialed(env);
+  // agy CLI 通道 (2026-09-11): 凭证是 agy 自己的登录目录, 同 claude-code 一样不在两栈可见面上。
+  if (provider === AGY_CLI_PROVIDER) return agyCredentialed(env);
   return !!getProvider(provider) || piHasCredential(provider, env);
 }
 

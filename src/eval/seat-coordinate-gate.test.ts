@@ -199,6 +199,7 @@ const ALLOWLIST: readonly { file: string; coord: string; reason: string }[] = [
   { file: 'src/model/auto-assign.ts', coord: 'deepseek:deepseek-v4-flash', reason: 'auto-assign 落类首选兜底 (PREFERRED_COORD ×4 + REDUCE_COORD); resolveSeatModel 链 auto-assign 层的声明, 非绕过' },
   { file: 'src/model/model-ratings.ts', coord: 'kimi-coding:k3', reason: '注释示例 (D-8 provider 品牌+modelId 匹配逻辑说明), 非运行值' },
   { file: 'src/model/pool-defaults.ts', coord: 'opencode-go:deepseek-v4-flash', reason: '池源码默认 (FALLBACK_WORKER); 文件头明示 config/env 是真源, 本文件只是开箱兜底' },
+  { file: 'src/model/pool-defaults.ts', coord: 'agy-cli:claude-opus-4-6-thinking', reason: '池源码默认 (FALLBACK_VERIFY 首位, 2026-09-11 owner 裁 verifier 降级座); config.pools.fallbackVerify / env 压过它' },
   { file: 'src/model/pool-defaults.ts', coord: 'opencode-go:deepseek-v4-pro', reason: '池源码默认 (LENS_DIVERGENCE), 同上' },
   { file: 'src/model/pool-defaults.ts', coord: 'opencode-go:glm-5.2', reason: '池源码默认 (JUDGE_PANEL + FALLBACK_*), 同上' },
   { file: 'src/model/pool-defaults.ts', coord: 'opencode-go:kimi-k3', reason: '池源码默认 (FALLBACK_DECOMPOSER/JUDGE_SYNTH), 同上' },

@@ -55,7 +55,9 @@ const LENS_DIVERGENCE = ['opencode-go:qwen3.7-plus', 'opencode-go:minimax-m3', '
 const FALLBACK_DECOMPOSER = ['opencode-go:kimi-k3', 'opencode-go:glm-5.2'];
 const FALLBACK_JUDGE_SYNTH = ['opencode-go:kimi-k3', 'opencode-go:glm-5.2'];
 const FALLBACK_WORKER = ['opencode-go:deepseek-v4-flash', 'opencode-go:glm-5.2'];
-const FALLBACK_VERIFY = ['opencode-go:qwen3.8-max', 'opencode-go:glm-5.2'];
+// 2026-09-11 (owner 裁): verifier 撞限的降级座首选 Google 订阅里的 Claude Opus 4.6 (agy CLI 通道, 与 M3 异族,
+// 走独立的 Claude/GPT 配额桶); agy 没登录时 `usable()` 判无凭证, 自然顺延到后两个。
+const FALLBACK_VERIFY = ['agy-cli:claude-opus-4-6-thinking', 'opencode-go:qwen3.8-max', 'opencode-go:glm-5.2'];
 
 /**
  * 池 → 源码默认坐标。**只含有静态默认的那些档**。

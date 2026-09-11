@@ -43,7 +43,10 @@ export interface ChannelQuotaEntry {
 }
 
 /** 聚合渠道 (一个 provider 托管多家族模型) 的 provider 基名。家族须从 modelId 品牌头解析。 */
-const AGGREGATOR_PROVIDERS = new Set(["opencode"]);
+// agy-cli (Google 订阅 CLI, 2026-09-11) 也是聚合渠道: 一个 provider 托管 gemini / claude / gpt-oss 三家族,
+// 家族必须从 modelId 品牌头解析 —— 否则 `agy-cli:claude-opus-4-6-thinking` 坐 verifier 时会被判成
+// 与 conductor 的 M3 「同族/异族」都不对 (它既不是 minimax 也不该自成 "agy-cli" 一族)。
+const AGGREGATOR_PROVIDERS = new Set(["opencode", "agy-cli"]);
 /** 品牌归一: 渠道别名 → 家族名 (INV-3/INV-7 跨家族判定用 zhipu 与 glm 同族等; openai-codex = ChatGPT 订阅渠道 → gpt 家族)。 */
 const BRAND_ALIAS: Record<string, string> = {
 	zhipu: "glm",
@@ -55,6 +58,8 @@ const BRAND_ALIAS: Record<string, string> = {
 	"xiaomi-token-plan": "mimo",
 	"openai-codex": "gpt",
 	openai: "gpt",
+	// agy 托管的 Claude 与 Claude 订阅 SDK 通道同族 (品牌头 claude → claude-code)。
+	claude: "claude-code",
 };
 
 /**

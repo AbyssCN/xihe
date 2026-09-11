@@ -13,6 +13,7 @@ import { getProvider } from './providers';
 import { emitModelUsage } from './accounting';
 import { resolvePiModel, piModelFromProviderConfig, piRequest, type PiModel } from './pi-transport';
 import { CLAUDE_SDK_PROVIDER, sdkCompleteRaw } from './claude-sdk-complete';
+import { AGY_CLI_PROVIDER, agyCompleteRaw } from './agy-cli-complete';
 import { MINIMAX_NATIVE_PROVIDERS, minimaxCompleteRaw } from './minimax-native';
 import { reportProviderFailure, cooldownMsFor } from './provider-health';
 import { reportTruncation } from './truncation';
@@ -126,6 +127,15 @@ function resolveModel(req: ModelRequest): ResolvedTarget {
       resolved: `${CLAUDE_SDK_PROVIDER}:${modelId}`,
     };
   }
+  // ⓪' Google 订阅通道 (agy CLI, 2026-09-11): 同 claude-code 形状 —— 合成 target, doRequest 处改走 agy 子进程。
+  if (providerName === AGY_CLI_PROVIDER) {
+    const modelId = sep === -1 ? '' : raw.slice(sep + 1);
+    if (!modelId) throw new ModelError('config', `callModel: '${raw}' 缺 model id (agy-cli 无 defaultModel; 见 \`agy models\`)`);
+    return {
+      piModel: { id: modelId, provider: AGY_CLI_PROVIDER, contextWindow: 1_000_000 } as unknown as PiModel,
+      resolved: `${AGY_CLI_PROVIDER}:${modelId}`,
+    };
+  }
   const cfg = getProvider(providerName);
   if (cfg) {
     const modelId = sep === -1 ? cfg.defaultModel ?? '' : raw.slice(sep + 1);
@@ -226,6 +236,9 @@ function doRequest(
   // Claude 订阅完成位: 单发 SDK query, 外层重试/截断守卫/schema 纠错/熔断原样复用。
   if ((target.piModel as { provider?: string }).provider === CLAUDE_SDK_PROVIDER) {
     return sdkCompleteRaw((target.piModel as { id: string }).id, messages, req);
+  }
+  if ((target.piModel as { provider?: string }).provider === AGY_CLI_PROVIDER) {
+    return agyCompleteRaw((target.piModel as { id: string }).id, messages, req);
   }
   // MiniMax 原生位 (owner 2026-08-14): pi 目录给 minimax-cn 的是 anthropic 兼容那条端点, 它把推理
   // **内联进 text** (`<think>…</think>{…}`), 而本仓对 `<think>` 零处理 → 量产座位格式守实测 37%。

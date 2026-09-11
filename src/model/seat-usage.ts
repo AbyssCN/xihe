@@ -257,7 +257,7 @@ export function seatUsagePathWritable(): string {
  */
 const REAL_PROVIDER_PREFIXES = [
   'deepseek:', 'minimax-cn:', 'minimax:', 'claude-code:', 'openai-codex:', 'openai:',
-  'anthropic:', 'kimi-coding:', 'opencode-go:', 'mimo-platform:', 'mimo:', 'google:',
+  'anthropic:', 'kimi-coding:', 'opencode-go:', 'mimo-platform:', 'mimo:', 'google:', 'agy-cli:',
 ] as const;
 
 /**

@@ -78,6 +78,7 @@ import {
   type ThinkingLevel,
 } from '../model/role-models';
 import { createAgentLeafRunner } from '../harness/agent-leaf';
+import { withAgyLeaf } from '../harness/agy-leaf';
 import { createLeafTranscriptSink } from '../harness/leaf-transcript';
 import { runtimeAllowlistForRoot } from '../harness/env-facts';
 import type { SpinRung2StampPools } from '../harness/dag/spin-rung2';
@@ -488,9 +489,10 @@ export function assembleOmdMcpTools(deps: AssembleOmdMcpDeps = {}): OmdMcpTool[]
     if (!v) return null;
     return /^(1|true|on)$/i.test(v) ? join(cwd, '.omd', 'leaf-transcript.jsonl') : v;
   })();
+  // agy-cli:* 坐标 → Google 订阅 CLI leaf (2026-09-11); 其余坐标原样进 createAgentLeafRunner。注入的 deps.agentRunner 不套。
   const agentRunner =
     deps.agentRunner ??
-    createAgentLeafRunner({
+    withAgyLeaf(createAgentLeafRunner({
       // hashlineEdit **默认关** (owner 2026-08-18, 读数见 scripts/probes/readings/2026-08-18-hashline-ab.md):
       // 加难度 A/B (4 题, 两题的实现文件 3.9k 行, 两臂同去位置提示, 座位钉 M3) 8/8 全过,
       // 关闭臂 tokensIn 中位 675,683 → 404,930。开关与实装都留着 —— 优化+补测之后再考虑上线。
@@ -512,7 +514,7 @@ export function assembleOmdMcpTools(deps: AssembleOmdMcpDeps = {}): OmdMcpTool[]
       // 为什么需要: leaf 空转是本仓目前最强的一条负相关 (reward 0.453 → 0.238), 而判它是
       // 病因还是伴随现象要看叶子当时在调什么 —— 那份 transcript 此前一个字节都没留。
       ...(leafTranscriptPath ? { onEvent: createLeafTranscriptSink({ path: leafTranscriptPath }) } : {}),
-    });
+    }), { cwd, leafTimeoutMs });
   // 运行期白名单 = marker 表 ∪ **真探测**实测启用的 bin (2026-08-29)。
   //
   // ⚠ 这一处必须与分类期同源, 否则就是本仓最怕的那种「假红」: classify 用真探测判这个仓能跑
@@ -604,7 +606,7 @@ export function assembleOmdMcpTools(deps: AssembleOmdMcpDeps = {}): OmdMcpTool[]
     }
     const agentRunnerForRun =
       overrideCwd && !deps.agentRunner
-        ? createAgentLeafRunner({
+        ? withAgyLeaf(createAgentLeafRunner({
             cwd: root,
             hashlineEdit: false, // 同上 (owner 2026-08-18): 两个装配点必须同档, 分叉就是两套工具面
             leafTimeoutMs,
@@ -618,7 +620,7 @@ export function assembleOmdMcpTools(deps: AssembleOmdMcpDeps = {}): OmdMcpTool[]
             ...(extToolsForRun && extToolsForRun.length ? { customTools: extToolsForRun } : {}),
             // D2 切片 2 (#266): 隔离档下仓规检查仍走 (写集 = worktree 内文件); 默认空 = 无清单。
             repoChecks,
-          })
+          }), { cwd: root, leafTimeoutMs })
         : agentRunner;
     const commandRunnerForRun =
       overrideCwd && !deps.commandRunner

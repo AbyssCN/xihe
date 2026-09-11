@@ -31,6 +31,19 @@ import { tryResolveSeatModel } from '../model/role-models';
 import { seatSpec } from '../model/seats';
 import { effectiveSeatSampling } from '../model/seat-overrides';
 import { withGoFallback } from '../model/gateway';
+import { withPoolFallback } from '../model/seat-fallback';
+import { resolveConfiguredPools } from '../model/role-models';
+import { POOL_DEFAULTS } from '../model/pool-defaults';
+
+/** verifier 降级池: config.pools.fallbackVerify (env 压过) → 源码默认。每次调用重解 (INV-MODEL-3, 不冻结)。 */
+function verifyFallbackPool(): readonly string[] {
+  try {
+    return resolveConfiguredPools().fallbackVerify ?? POOL_DEFAULTS.fallbackVerify ?? [];
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, '[omd/verifier] 降级池解析失败 → 用源码默认');
+    return POOL_DEFAULTS.fallbackVerify ?? [];
+  }
+}
 import { logger } from './logger';
 import { engineFacts } from './plan/claimed-actions';
 import { renderDiffEvidence, type DiffEvidence } from './diff-evidence';
@@ -440,7 +453,9 @@ export function createDefaultVerifier(opts: DefaultVerifierOpts): VerifierFn {
     // 没给 artifactRoot ⇒ 空串 ⇒ 卷面逐字节同旧 (INV-6, 老调用方零回归)。
     const diffSection = artifactRoot ? renderDiffSection(renderDiffEvidence(artifactRoot)) : '';
     // A② GO fallback: verifierModel 走 opencode-go 端点溢出 → 回退 ds-v4-pro 官方 (跨模型校验不能因 GO 抖动整轮失败)。
-    const r = await withGoFallback(opts.verifierModel, (m) =>
+    // 2026-09-11 降级座 (owner 裁): verifier 撞 session limit / 402 / 429 / 5xx → pools.fallbackVerify 里第一个
+    // 可用坐标再判一次 (默认首选 agy-cli:claude-opus-4-6-thinking, 与 M3 异族、独立配额桶)。GO 抖动那格仍由内层管。
+    const r = await withPoolFallback(opts.verifierModel, verifyFallbackPool(), (mm) => withGoFallback(mm, (m) =>
       call({
         model: m,
         // #144 洞 1: 这一发此前**不带 role** → 落进 seat-usage 的 `(unattributed)` 桶,
@@ -459,7 +474,7 @@ export function createDefaultVerifier(opts: DefaultVerifierOpts): VerifierFn {
         thinkingLevel: opts.thinkingLevel ?? seatSpec('verifier')?.thinking ?? 'xhigh',
         responseSchema: VERIFIER_VERDICT_SCHEMA,
       }),
-    );
+    ), { role: 'verifier' });
     const v = r.parsed as { pass: boolean; reason: string; target?: unknown } | undefined;
     // VER-1: 未结构化输出 → 保守 fail (不静默放行)。判卷官没说话, 分型同样只能是默认值。
     if (!v) return { pass: false, reason: 'verifier 未结构化输出 → 保守判不通过', target: 'implementation', usage: r.usage };
