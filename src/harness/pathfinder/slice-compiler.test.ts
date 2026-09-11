@@ -49,21 +49,27 @@ describe('compileSlice', () => {
     expect(() => compileSlice(m, ['a'])).toThrow(/缺 executorKind/);
   });
 
-  test('executorKind 映射: command/agent 直通, inproc/primitive/map → leaf (map/primitive 无 spec 降级)', () => {
+  test('executorKind 映射: command/agent 直通, inproc → leaf', () => {
     const m = mapOf([
       ticket({ id: 'c', ruling: 'r', executorKind: 'command' }),
       ticket({ id: 'ag', ruling: 'r', executorKind: 'agent' }),
-      ticket({ id: 'mp', ruling: 'r', executorKind: 'map' }),
-      ticket({ id: 'p', ruling: 'r', executorKind: 'primitive' }),
       ticket({ id: 'i', ruling: 'r', executorKind: 'inproc' }),
     ]);
-    const plan = compileSlice(m, ['c', 'ag', 'mp', 'p', 'i']);
+    const plan = compileSlice(m, ['c', 'ag', 'i']);
     expect(plan.nodes.c!.executor).toBe('command');
     expect(plan.nodes.ag!.executor).toBe('agent');
-    expect(plan.nodes.mp!.executor).toBe('leaf'); // map 无 MapSpec → 降级
-    expect(plan.nodes.p!.executor).toBe('leaf');
     expect(plan.nodes.i!.executor).toBe('leaf');
-    expect(PlanSchema.safeParse(plan).success).toBe(true);
+  });
+
+  /**
+   * 2026-09-11: map / primitive 不再静默塌成 leaf —— 编译期抛。
+   * 反向自检: 把 slice-compiler.ts 的 `case 'map': case 'primitive':` 改回 `return 'leaf'` → 本条红。
+   */
+  test('executorKind map/primitive → 编译期抛, 不降级 leaf', () => {
+    for (const kind of ['map', 'primitive'] as const) {
+      const m = mapOf([ticket({ id: 'x', ruling: 'r', executorKind: kind })]);
+      expect(() => compileSlice(m, ['x'])).toThrow(new RegExp(`executorKind='${kind}'`));
+    }
   });
 
   test('depends_on 只保留 region 内的边 (region 外前置被裁掉) — #197: executorKind 显式给', () => {

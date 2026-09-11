@@ -17,11 +17,10 @@ import type { ExecutorKind, PathMap, Ticket } from './types';
 
 /**
  * Ticket.executorKind → ConductorPlan.executor 枚举映射。
- * command/agent 直通。inproc/primitive/map → leaf:
- *  - inproc = 单发模型调用 = leaf 语义。
- *  - primitive 需 kind/primitive/params, map 需完整 MapSpec (lister/over/template) —— 票在编译期
- *    **不携带**这些 (D-11 只组装不发明), 强行 emit `executor:'map'` 会撞 PlanSchema 的
- *    map⇔executor 互 required 交叉校验。故 P0 降级为 leaf (runtime-finalize P1 可再展开)。
+ * command/agent 直通。inproc → leaf (单发模型调用 = leaf 语义)。
+ * primitive 需 kind/primitive/params, map 需完整 MapSpec (lister/over/template) —— 票在编译期
+ * **不携带**这些 (D-11 只组装不发明), 强行 emit `executor:'map'` 会撞 PlanSchema 的
+ * map⇔executor 互 required 交叉校验。旧行为「降级为 leaf」2026-09-11 摘掉: 改为编译期抛。
  */
 function toPlanExecutor(kind: ExecutorKind | undefined): 'agent' | 'leaf' | 'command' | 'map' {
   if (kind === undefined) {
@@ -37,9 +36,15 @@ function toPlanExecutor(kind: ExecutorKind | undefined): 'agent' | 'leaf' | 'com
       return 'command';
     case 'agent':
       return 'agent';
-    case 'map':
     case 'inproc':
+      return 'leaf';
+    // 2026-09-11: map / primitive 此前静默塌成 leaf (schema 露 6 个值, 3 个塌成同一个) —— 票要的是
+    // 运行期展开的清单节点 / 原语节点, 编成单发 leaf 跑完照样翻 delivered, 症状沉默。票在编译期不携带
+    // MapSpec / primitive 参数 (D-11 只组装不发明), 所以这里**拒**, 不降级; 要用它们先把票拆成 agent
+    // 或 command, 或等 runtime-finalize 把 spec 接上。反向自检: slice-compiler.test.ts「map/primitive 编译期抛」。
+    case 'map':
     case 'primitive':
+      throw new Error(`executorKind='${kind}' 票在 slice 编译期无 spec 可展开, 不降级成 leaf — 改 executorKind 为 agent/command, 或补 MapSpec/primitive 参数后再交付`);
     default:
       return 'leaf';
   }

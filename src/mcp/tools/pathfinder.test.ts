@@ -73,6 +73,30 @@ describe('pathfinder MCP tools', () => {
     }
   });
 
+  /**
+   * 2026-09-11: task 票 executorKind=map/primitive 装配期即拒 (slice 编译期本就无 spec 可展开)。
+   * 反向自检: 摘掉 pathfinder.ts 里那道闸 → 本条第一段红 (票被收下)。
+   */
+  test('map_add 拒 task 票的 executorKind=map/primitive; agent/command/inproc 照收', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pf-mcp-'));
+    try {
+      const { call } = tools(dir);
+      await call('path_map', { destination: 'Ship X' });
+      for (const executorKind of ['map', 'primitive'] as const) {
+        const r = await call('path_add', { title: `${executorKind} 票`, type: 'task', executorKind });
+        expect(r.isError).toBe(true);
+        expect(r.text).toContain(`executorKind='${executorKind}'`);
+        expect(r.text).toContain('agent');
+      }
+      expect((await call('path_tickets')).text).toContain('0 tickets');
+      for (const executorKind of ['agent', 'command', 'inproc'] as const) {
+        expect((await call('path_add', { title: `${executorKind} 票`, type: 'task', executorKind })).isError).toBe(false);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('map→add→rule→deliver 全链: 区域报信 → 显式交付 → 票翻 delivered', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'pf-mcp-'));
     try {

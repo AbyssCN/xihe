@@ -397,7 +397,7 @@ function makeAdd(deps: PathfinderToolDeps): OmdMcpTool {
       id: z.string().optional().describe('Stable ticket id (omit = auto t1/r1/…)'),
       blockedBy: z.array(z.string()).default([]).describe('Prerequisite ticket ids (gates ruling: all must be ruled before this enters the frontier)'),
       blockedByDelivery: z.array(z.string()).default([]).describe('#138: delivery-level prerequisites — these tickets must be DELIVERED (not just ruled) before this one can enter the deliverable region. Use when the prerequisite must actually produce data first.'),
-      executorKind: z.enum(['command', 'inproc', 'agent', 'map', 'primitive', 'goal']).optional().describe("task: executor kind (default inproc; 'goal' = converge via detached solve, D-G1). prototype always converges via solve (#135) — non-goal values are inert for it."),
+      executorKind: z.enum(['command', 'inproc', 'agent', 'map', 'primitive', 'goal']).optional().describe("task: executor kind — command | inproc (single model call) | agent (tools, writes files) | goal (converge via detached solve, D-G1). 'map' / 'primitive' are rejected for task tickets (no spec at compile time, 2026-09-11). prototype always converges via solve (#135) — non-goal values are inert for it."),
     },
     handler: async ({ title, type, slug, id, blockedBy, blockedByDelivery, executorKind }) => {
       // 防御缺省 (schema default 只在 SDK 层生效; 直调 handler 也要稳)。
@@ -413,6 +413,14 @@ function makeAdd(deps: PathfinderToolDeps): OmdMcpTool {
       if ((ttype === 'task' || ttype === 'prototype') && executorKind === undefined) {
         return err(
           `task/prototype 票缺 executorKind — 默认会被编成无工具 leaf (单发模型调用, 写不了文件), 跑完却把票翻 delivered; 修复: 显式给 executorKind`,
+        );
+      }
+      // 2026-09-11: map / primitive 票 slice 编译期必抛 (票不携带 MapSpec / primitive 参数, 见 slice-compiler
+      // toPlanExecutor), 装配期就拒 —— 晚到交付期才炸等于让人白排一张票。反向自检: 摘掉本闸 → map_add 收下
+      // executorKind='map' 的票, deliver 时在 slice-compiler 抛 (pathfinder-executor-kind.test.ts)。
+      if (ttype === 'task' && (executorKind === 'map' || executorKind === 'primitive')) {
+        return err(
+          `executorKind='${executorKind}' 票不能进 slice 图: 票在编译期不携带 MapSpec / primitive 参数, 会在交付时炸 — 改用 agent (带工具改文件) 或 command (确定性命令)`,
         );
       }
       let created: Ticket;
