@@ -433,6 +433,7 @@ function launchPlanRun(
   const config: ExecutorDagConfig = {
     ...defaultConfig,
     leafModel: leafModel ?? defaultConfig?.leafModel ?? '',
+    ...(leafModel ? { agentLeafModel: leafModel } : {}), // 同 run: 显式参数覆盖 agent 座 (2026-09-11)
     // D-P: 取消把手 (dag_cancel 拉它; 引擎在调度接缝上自己停, 不杀在飞节点)。
     cancelSignal: runRegistry.attachCancel(runId),
     onNodeEvent: (e) => {
@@ -755,6 +756,10 @@ function executeDagRunInProc(
     ...defaultConfig,
     conductorModel: conductorModel ?? defaultConfig?.conductorModel ?? '',
     leafModel: leafModel ?? defaultConfig?.leafModel ?? '',
+    // 显式 leafModel 参数同时覆盖 agent 座 (2026-09-11): 装配层的 defaultConfig 带 agentLeafModel
+    // (= 座位表 agent 座), 而 agent 节点的静态解析是 `agentLeafModel ?? leafModel` —— 此前用户传了
+    // leafModel, agent 节点照旧坐座位表那把, 参数静默失效 (run 1c6b8a69 传 sonnet, 叶子仍 M3)。
+    ...(leafModel ? { agentLeafModel: leafModel } : {}),
     // D-P: 取消把手 (dag_cancel 拉它)。
     cancelSignal: runRegistry.attachCancel(runId),
     // 活体进度: conductor 出图后引擎发 planned → start/settle 流进 registry (dag_status 实时) +

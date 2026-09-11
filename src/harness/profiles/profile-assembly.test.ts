@@ -101,9 +101,9 @@ describe('G-3: design-review profile injection', () => {
     expect(persona.length).toBeGreaterThan(10);
     expect(persona).toContain('审核');
 
-    // seat: 非空, 已设到具体模型坐标
-    expect(typeof prof!.seat).toBe('string');
-    expect(prof!.seat!.length).toBeGreaterThan(0);
+    // seat: 内置层**不钉**具体坐标 (2026-09-11, run 1c6b8a69: 钉死的 mimo-platform 余额 402, 四节点全落死座)。
+    // 座位由座位表 / run 参数 / 项目层 .omd/profiles 给; 机制本身 (profile.seat 优先级) 在 profile-integration G-6 用项目层夹具测。
+    expect(prof!.seat).toBeUndefined();
 
     // skills: 非空数组, 含三件蒸馏配套 skill (2026-08-11 owner 裁: impeccable+huashu+taste,
     // vendor 在 .omd/skills/, persona 蒸馏语料见 docs/reference/design-review-distill-2026-08-11/)
@@ -153,9 +153,17 @@ describe('G-6: explicit node model wins', () => {
    * 显式模型非空 → 直接用, 不看 profile.seat。
    */
 
+  /** 内置档案不钉座 (2026-09-11) → seat 由项目层夹具给 (字段级合并进内置 design-review)。 */
+  const pinSeat = (): void => {
+    const { mkdirSync, writeFileSync } = require('node:fs') as typeof import('node:fs');
+    mkdirSync(join(cwd, '.omd', 'profiles'), { recursive: true });
+    writeFileSync(join(cwd, '.omd', 'profiles', 'design-review.json'), JSON.stringify({ name: 'design-review', seat: 'pin:profile-seat' }));
+  };
+
   test('inputModel 非空时决议为 inputModel, 不用 profile.seat', () => {
+    pinSeat();
     const prof = resolveProfile('design-review', cwd);
-    expect(prof?.seat).toBeTruthy(); // 前置: profile 有 seat
+    expect(prof?.seat).toBeTruthy(); // 前置: profile 有 seat (项目层)
 
     const inputModel = 'explicit-provider:explicit-model';
     // 模拟 L884 决议逻辑
@@ -165,8 +173,9 @@ describe('G-6: explicit node model wins', () => {
   });
 
   test('inputModel 为空时回退到 profile.seat', () => {
+    pinSeat();
     const prof = resolveProfile('design-review', cwd);
-    expect(prof?.seat).toBeTruthy();
+    expect(prof?.seat).toBe('pin:profile-seat');
 
     const inputModel = '';
     const resolved = inputModel || prof?.seat || '';

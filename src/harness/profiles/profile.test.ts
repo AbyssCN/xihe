@@ -150,9 +150,30 @@ describe('C-7 判据只有一份 (design-review 档案不再承载判据表)', (
     const 判据词 = ['p0', 'p1', 'p2', '硬闸', '命中即报'].filter((w) => persona.includes(w));
     expect(判据词).toEqual([]);
     // 装配位字段一个都不许在瘦身里丢 (D-14: 它们是卡没有的东西, 且都不进 prompt)。
-    expect(spec.seat).toBeTruthy();
+    // ⚠ seat 例外 (2026-09-11 实账 run 1c6b8a69): 内置档案曾钉死 `mimo-platform:mimo-v2.5`, 该座
+    // 余额 402, conductor 给 spawn 节点挑 design-review 后四节点全落死座, 重试 36 次零产出 ——
+    // profile.seat 优先级高于 run 参数与座位表 (engine TPL-3), 内置层不许钉具体 provider 坐标。
+    // 反向自检: 把 "seat": "x:y" 写回 json → 本断言与下方「内置档案不钉座」用例同时红。
+    expect(spec.seat).toBeUndefined();
     expect(spec.outputSchema).toBeTruthy();
     expect(spec.ledgerPath).toBeTruthy();
     expect(spec.frontendGlob).toBeTruthy();
+  });
+});
+
+/**
+ * 内置档案不钉具体 provider 坐标 (2026-09-11)。座位由座位表 / run 参数 / 项目层 .omd/profiles 决定;
+ * 内置层是随包发布的, 钉一个坐标 = 把作者机器上的账户写进产品。
+ * 反向自检: 给任一内置 json 加 "seat": "mimo-platform:mimo-v2.5" → 红。
+ */
+describe('内置档案不钉座', () => {
+  test('src/harness/profiles/builtin/*.json 一律无 seat', () => {
+    const { readdirSync } = require('node:fs') as typeof import('node:fs');
+    const pinned: string[] = [];
+    for (const f of readdirSync(BUILTIN_DIR).filter((x) => x.endsWith('.json'))) {
+      const spec = JSON.parse(readFileSync(join(BUILTIN_DIR, f), 'utf8')) as ProfileSpec;
+      if (spec.seat !== undefined) pinned.push(`${f}: ${spec.seat}`);
+    }
+    expect(pinned).toEqual([]);
   });
 });

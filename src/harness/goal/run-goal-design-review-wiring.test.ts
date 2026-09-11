@@ -82,7 +82,9 @@ describe('runGoal production designReview 装配', () => {
     expect(seen[0]?.prompt).toContain(`截图命令(逐字执行): ${screenshotCommand}`);
     expect(seen[0]?.prompt).toContain('审查真实截图像素');
     expect(seen[0]?.profile?.name).toBe('design-review');
-    expect(seen[0]?.model).toBe(seen[0]?.profile?.seat);
+    // 内置 design-review 不钉座 (2026-09-11) → 模型来自座位链的 agent 座, 不再来自 profile.seat。
+    expect(seen[0]?.profile?.seat).toBeUndefined();
+    expect(seen[0]?.model).toBe('test:agent');
     expect(result.designReview?.findings[0]?.evidence).toBe('hero pixels are off-grid');
     expect(result.designReview?.usage).toEqual({ in: 12, out: 4 });
   });

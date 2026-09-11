@@ -129,6 +129,19 @@ import { createAdvisorTool, createTranscriptRecorder } from './advisor-tool';
 import { promptVersionOfText } from '../model/langfuse';
 import type { ContentPart, ModelUsage } from '../model/types';
 import { emitModelUsage } from '../model/accounting';
+import { cooldownMsFor, reportProviderFailure } from '../model/provider-health';
+
+/**
+ * pi 循环的 errorMessage 头部状态码 (`402: {...}` / `pi: 429: ...` / `HTTP 503`)。取不到 → undefined
+ * (不猜: 没有状态码就不冷却, 与 callModel 的 401 不熔断同一口径)。测试见 agent-leaf-provider-status.test.ts。
+ */
+export function providerErrorStatus(msg: string | undefined): number | undefined {
+  if (!msg) return undefined;
+  const m = /(?:^|[^0-9])([1-5][0-9]{2})(?=\s*:|\s*[{(]|\s*$)/.exec(msg.slice(0, 80));
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  return n >= 100 && n <= 599 ? n : undefined;
+}
 import { resolveRoleModelConfigured, type ThinkingLevel } from '../model/role-models';
 import { isStrongCoord } from '../model/model-ratings';
 
@@ -3084,6 +3097,14 @@ export function createAgentLeafRunner(opts: AgentLeafRunnerOpts = {}): AgentLeaf
       | { role?: string; stopReason?: string; errorMessage?: string }
       | undefined;
     if (last?.role === 'assistant' && last.stopReason === 'error') {
+      // 冷却轴 (2026-09-11, run 1c6b8a69): pi 循环把 provider 错误放在消息里返回, 不经 callModel 的
+      // 熔断路 (index.ts:401) —— 于是 402/429/5xx 从不冷却该坐标, 上层 L0 重试与兄弟节点照打同一个
+      // 死座 (实账 36 次 402)。这里按 callModel 同一把尺 (isProviderFault 的状态码集) 报一次。
+      const status = providerErrorStatus(last.errorMessage);
+      if (status !== undefined && (status === 402 || status === 403 || status === 429 || status >= 500)) {
+        reportProviderFailure(model, cooldownMsFor(status, { channel: provider, period: status === 402 }));
+        logger.warn({ model, status }, '[agent-leaf] provider 故障 → 坐标进冷却 (兄弟/重试改走座位链)');
+      }
       throw new Error(
         `[agent-leaf] provider 报错 (model=${model}): ${last.errorMessage ?? '(无 errorMessage)'}`,
       );

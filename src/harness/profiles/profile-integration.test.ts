@@ -20,6 +20,21 @@ import type { AgentLeafRunner } from '../leaf-runners';
 import type { ConductorPlan } from '../conductor-plan';
 import { setCoreLogger, type CoreLogger } from '../logger';
 import { loadProfiles } from './profile';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+/**
+ * G-6 夹具 (2026-09-11): 内置档案不再钉座 (见 profile-assembly.test.ts G-3), profile.seat 的优先级机制
+ * 改用**项目层**档案测 —— 写进 `<cwd>/.omd/profiles/` (引擎按 process.cwd() 解档案), 用例结束即删。
+ * 名字带 test 前缀, 与仓内 bench-tools-*.json 不撞。
+ */
+const SEAT_FIXTURE = { name: 'zz-seat-pinned-test', seat: 'pin:profile-seat' };
+const seatFixturePath = join(process.cwd(), '.omd', 'profiles', `${SEAT_FIXTURE.name}.json`);
+function withSeatFixture<T>(fn: () => Promise<T>): Promise<T> {
+  mkdirSync(join(process.cwd(), '.omd', 'profiles'), { recursive: true });
+  writeFileSync(seatFixturePath, JSON.stringify({ ...SEAT_FIXTURE, persona: 'seat fixture' }));
+  return fn().finally(() => rmSync(seatFixturePath, { force: true }));
+}
 
 // ── 共享夹具 ─────────────────────────────────────────────────────────────
 
@@ -166,8 +181,22 @@ describe('G-6: 模型解析精确度序', () => {
     );
     expect(r.results.pinned!.status).toBe('done');
     expect(seenModel).toBe(explicit);
-    const known = loadProfiles(process.cwd()).get('design-review');
-    expect(seenModel).not.toBe(known?.seat);
+  });
+
+  test('node.model 显式 > 项目层 profile.seat', async () => {
+    let seenModel: string | undefined;
+    const fakeRunner: AgentLeafRunner = async (input) => {
+      seenModel = input.model;
+      return { text: 'ok', usage: { in: 1, out: 1 } };
+    };
+    await withSeatFixture(async () => {
+      const r = await runExecutorDagWithPlan(
+        plan({ pinned: { goal: '跑一步', executor: 'agent', profile: SEAT_FIXTURE.name, model: 'explicit:wins' } }),
+        makeConfig(fakeRunner),
+      );
+      expect(r.results.pinned!.status).toBe('done');
+    });
+    expect(seenModel).toBe('explicit:wins');
   });
 
   test('无 node.model 时引擎回退到 profile.seat, 而不是静默用 config 缺省模型', async () => {
@@ -177,14 +206,15 @@ describe('G-6: 模型解析精确度序', () => {
       seenModel = input.model;
       return { text: 'ok', usage: { in: 1, out: 1 } };
     };
-    const known = loadProfiles(process.cwd()).get('design-review');
-    expect(known?.seat).toBeTruthy();
-    const r = await runExecutorDagWithPlan(
-      plan({ unpinned: { goal: '跑一步', executor: 'agent', profile: 'design-review' } }),
-      makeConfig(fakeRunner, { leafModel: 'fallback:should-not-win', agentLeafModel: 'fallback:should-not-win' }),
-    );
-    expect(r.results.unpinned!.status).toBe('done');
-    expect(seenModel).toBe(known?.seat);
+    await withSeatFixture(async () => {
+      expect(loadProfiles(process.cwd()).get(SEAT_FIXTURE.name)?.seat).toBe(SEAT_FIXTURE.seat);
+      const r = await runExecutorDagWithPlan(
+        plan({ unpinned: { goal: '跑一步', executor: 'agent', profile: SEAT_FIXTURE.name } }),
+        makeConfig(fakeRunner, { leafModel: 'fallback:should-not-win', agentLeafModel: 'fallback:should-not-win' }),
+      );
+      expect(r.results.unpinned!.status).toBe('done');
+    });
+    expect(seenModel).toBe(SEAT_FIXTURE.seat);
   });
 });
 

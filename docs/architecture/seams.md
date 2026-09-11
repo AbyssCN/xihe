@@ -17,7 +17,7 @@
 |---|---|---|---|---|
 | `conductorModel` | **是** | `string` | conductor 模型 'provider:modelId' (规划用, 我们=mimo:mimo-v2.5-pro)。 | `src/mcp/tools/dag-tools.ts`<br>`src/harness/dag/engine.ts`<br>`src/harness/goal/loop-run.ts` (19 文件) |
 | `leafModel` | **是** | `string` | inproc leaf 模型 'provider:modelId' (生成/判断单发)。 | `src/mcp/tools/dag-tools.ts`<br>`src/harness/dag/engine.ts`<br>`src/eval/oracles/fullstack-dag.ts` (13 文件) |
-| `agentLeafModel` |  | `string` | agent leaf 模型 (带工具改文件)。 | `src/mcp/tools/pathfinder.ts`<br>`src/harness/dag/engine.ts`<br>`src/harness/execute-slice.ts` (10 文件) |
+| `agentLeafModel` |  | `string` | agent leaf 模型 (带工具改文件)。 | `src/mcp/tools/dag-tools.ts`<br>`src/mcp/tools/pathfinder.ts`<br>`src/harness/dag/engine.ts` (10 文件) |
 | `conductorEscalationModel` |  | `string` | conductor 升级模型 'provider:modelId' (verifier fail 时用更强模型重规划重跑)。 | `src/harness/dag/engine.ts`<br>`src/harness/execute-slice.ts`<br>`src/mcp/assemble.ts` (6 文件) |
 
 ## DagThinkingSeam
@@ -36,7 +36,7 @@
 
 | 字段 | 必填 | 类型 | 一句话 | 消费方 (前3) |
 |---|---|---|---|---|
-| `generate` |  | `GenerateFn` | 注入式模型调用 (inproc leaf, 默认 callModel)。 | `src/harness/dag/engine.ts`<br>`src/harness/goal/run-goal.ts`<br>`src/harness/goal/classify-acceptance.ts` (9 文件) |
+| `generate` |  | `GenerateFn` | 注入式模型调用 (inproc leaf, 默认 callModel)。 | `src/harness/dag/engine.ts`<br>`src/harness/goal/run-goal.ts`<br>`src/harness/goal/classify-acceptance.ts` (10 文件) |
 | `agentRunner` |  | `AgentLeafRunner` | agent-kind leaf 的执行器 (带工具子 agent, 能改文件)。 | `src/mcp/assemble.ts`<br>`src/harness/dag/engine.ts`<br>`src/harness/goal/run-goal.ts` (7 文件) |
 | `commandRunner` |  | `CommandLeafRunner` | command-kind leaf 的执行器 (确定性 CLI, 零 LLM, 方案 A)。 | `src/harness/goal/run-goal.ts`<br>`src/mcp/assemble.ts`<br>`src/harness/dag/engine.ts` (8 文件) |
 | `forRoot` |  | `(root: string) => Pick<ExecutorDagConfig, 'agentRunner' \|…` | **换根时重建这两只手** (R5.1, 2026-09-07, 契约 `docs/plan/2026-09-06-并行实装扇出-执行契约.md` D-R5.1-2)。 | `src/mcp/assemble.ts`<br>`src/harness/goal/loop-run.ts` (2 文件) |

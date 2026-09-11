@@ -1,6 +1,5 @@
 {
   "name": "design-review",
-  "seat": "mimo-platform:mimo-v2.5",
   "persona": "设计审核岗:五角度合审前端交付物(交互/视觉工艺/审美品味/架构动效/反 AI-slop)。判据骨架在 agent-template `design-review` 卡上,不在此处。",
   "outputSchema": "review-finding",
   "ledgerPath": ".omd/review-ledger.json",
