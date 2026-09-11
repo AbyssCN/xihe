@@ -194,12 +194,12 @@ describe('correctionCandidates', () => {
     expect(c1.payload.situation).toBe('family X synthesis');
   });
 
-  test('两条 identityKey 不同 (situation+approach 不同) → 互不 supersede', () => {
+  test('两条同 identity (scope+subject; subject = situation 机械 slug) → 第二条 worked 取代第一条 failed (2026-09-11 T-H)', () => {
     const cs = correctionCandidates(parsed, 's1', 5);
-    // identityKey for omd.pattern = [situation, approach]
-    const id0 = `${cs[0]!.payload.situation}::${cs[0]!.payload.approach}`;
-    const id1 = `${cs[1]!.payload.situation}::${cs[1]!.payload.approach}`;
-    expect(id0).not.toBe(id1);
+    expect(cs[0]!.payload.subject).toBe(cs[1]!.payload.subject);
+    expect(cs[0]!.payload.subject).toMatch(/^[a-z0-9][a-z0-9._:-]{1,47}$/);
+    expect(cs[0]!.payload.outcome).toBe('failed');
+    expect(cs[1]!.payload.outcome).toBe('worked'); // 顺序即取代顺序: 召回拿到 worked
   });
 
   test('sessionRef 指回正确 sessionId+seq', () => {

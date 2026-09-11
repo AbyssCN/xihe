@@ -76,6 +76,12 @@ export interface NamespacePack {
   /** branch 含的全部 namespace 字面 (pack 从自己 branches .shape 派生 — 在 pack 侧静态类型仍在)。 */
   readonly allowedNamespaces: readonly string[];
   readonly identityFields: Record<string, readonly string[]>;
+  /**
+   * 身份键收窄时的**旧键回落** (2026-09-11): 主 identity 字段里任一在 fact 上缺席 → 用这组字段算键。
+   * 用途: `omd.pattern` 从 [situation, approach, scope] 收窄到 [scope, subject] 后, 不带 subject 的既有写手
+   * (pathfinder 裁决) 与库里旧行仍按旧键分身 —— 否则它们会全部塌成一个 identity, 每次写都顶掉上一条。
+   */
+  readonly legacyIdentityFields?: Record<string, readonly string[]>;
   /** 该 pack 禁记的 namespace glob (无通用 baseline — ban 是辖区/domain 的事, 各 pack 自带; 见 P1#1 the owner 校准)。 */
   readonly banGlobs: readonly string[];
 }
@@ -107,12 +113,16 @@ export function assembleSafeguard(packs: readonly NamespacePack[]): AssembledSaf
     {},
     ...packs.map((p) => p.identityFields),
   );
+  const legacyIdentityFields: Record<string, readonly string[]> = Object.assign(
+    {},
+    ...packs.map((p) => p.legacyIdentityFields ?? {}),
+  );
   const banGlobs = packs.flatMap((p) => [...p.banGlobs]);
   return {
     schema,
     allowedNamespaces,
     identityFields,
-    identityKeyOf: makeIdentityKeyOf(identityFields),
+    identityKeyOf: makeIdentityKeyOf(identityFields, legacyIdentityFields),
     banGlobs,
     matchedBanGlob: makeMatchedBanGlob(banGlobs),
   };
@@ -152,12 +162,16 @@ export function makeMatchedBanGlob(globs: readonly string[]): (namespace: string
  */
 export function makeIdentityKeyOf(
   identityFields: Record<string, readonly string[]>,
+  legacyIdentityFields: Record<string, readonly string[]> = {},
 ): (fact: { namespace: string } & Record<string, unknown>) => string {
   return (fact): string => {
-    const fields = identityFields[fact.namespace];
-    if (fields === undefined) {
+    const primary = identityFields[fact.namespace];
+    if (primary === undefined) {
       return JSON.stringify([fact.namespace, '__unmapped__']);
     }
+    // 旧键回落 (见 NamespacePack.legacyIdentityFields): 主字段缺席一个就整组换旧键 —— 半新半旧的键谁也对不上。
+    const legacy = legacyIdentityFields[fact.namespace];
+    const fields = legacy && primary.some((f) => fact[f] === undefined) ? legacy : primary;
     const parts = fields.map((f) => {
       const v = fact[f];
       if (v instanceof Date) return v.getTime();

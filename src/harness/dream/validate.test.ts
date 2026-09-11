@@ -90,6 +90,7 @@ const patternPayload = (situation: string): Record<string, unknown> => ({
   approach: '空产物判败不入账',
   outcome: 'failed',
   scope: 'oracle',
+  subject: 'acceptance-command', // 2026-09-11 T-H: identity 第二槽, dream 侧必带
 });
 
 const makeCandidate = (
@@ -352,5 +353,33 @@ describe('scope-拒(裁决 5:omd.pattern 必带受控 scope)', () => {
     expect(kOracle).not.toBe(kPlan);
     expect(kLegacy).not.toBe(kOracle);
     expect(kLegacy).toContain('null');
+  });
+
+  /**
+   * 2026-09-11 (T-H): subject 入键, situation/approach/outcome 出键。
+   * 反向自检: 把 OMD_NAMESPACE_IDENTITY_FIELDS['omd.pattern'] 改回 ['situation','approach','scope'] → 第一条红;
+   * 删掉 kernel 的 legacy 回落 → 第三条红 (无 subject 的两条 pattern 塌成同键)。
+   */
+  test('subject 入 identityKey:同 scope+subject 异 situation/approach/outcome 同键; 无 subject 走旧键', () => {
+    const a = { namespace: 'omd.pattern', scope: 'oracle', subject: 'verifier', situation: 's1', approach: 'a1', outcome: 'failed' };
+    const b = { namespace: 'omd.pattern', scope: 'oracle', subject: 'verifier', situation: 's2', approach: 'a2', outcome: 'worked' };
+    expect(identityKeyOf(a as never)).toBe(identityKeyOf(b as never));
+    expect(identityKeyOf({ ...a, subject: 'judge' } as never)).not.toBe(identityKeyOf(a as never));
+    const legacy1 = { namespace: 'omd.pattern', scope: 'oracle', situation: 's1', approach: 'a1', outcome: 'failed' };
+    const legacy2 = { namespace: 'omd.pattern', scope: 'oracle', situation: 's2', approach: 'a1', outcome: 'failed' };
+    expect(identityKeyOf(legacy1 as never)).not.toBe(identityKeyOf(legacy2 as never));
+  });
+
+  test('subject-拒: dream 侧 omd.pattern 缺 subject → rejected; oracle 给闭集外 subject → rejected', async () => {
+    resetSessionCacheForTest();
+    const cwd = tmpDir();
+    const ref = { sessionRef: await realSessionRef(cwd) };
+    const { subject: _drop, ...noSubject } = patternPayload('family X 的 synthesis 空产物判败');
+    const r1 = await validateDreamCandidate(makeCandidate(noSubject, ref), { cwd });
+    expect(r1.verdict).toBe('rejected');
+    if (r1.verdict === 'rejected') expect(r1.reason).toContain('subject');
+    const r2 = await validateDreamCandidate(makeCandidate({ ...patternPayload('family X 的 synthesis 空产物判败'), subject: 'vibes' }, ref), { cwd });
+    expect(r2.verdict).toBe('rejected');
+    if (r2.verdict === 'rejected') expect(r2.reason).toContain('subject-invalid');
   });
 });

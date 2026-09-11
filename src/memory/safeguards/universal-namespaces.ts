@@ -128,6 +128,34 @@ const USER_BRANCHES = [
 /** omd.pattern 的受控 scope 枚举 (dream SDD 终审裁决 5, 逐字冻结)。dream 写入侧必带 (validate 硬拒); pathfinder 等既有写手可缺省。 */
 export const OMD_PATTERN_SCOPES = ['chat-correction', 'plan-family', 'oracle', 'seat'] as const;
 
+/**
+ * omd.pattern 的 **subject** (2026-09-11, T-H 修): identity 的第二个受控槽。
+ * 实测 384 条 pattern = 384 个 identity —— situation/approach 是自由文本, 同一教训换措辞就是新身份,
+ * 晋升 (3 证据 ∧ 2 来源) 一次都没触发过 (agent_confident = 0)。identity 改成 [scope, subject]:
+ * situation/approach/outcome 降为 value, 同一主题的新教训**取代**旧的 (旧行 tombstone, 演化日志留痕),
+ * 证据在 identity 上累积, 晋升才有可能触发。
+ * 形状: 小写 slug, 2–48 字符。按 scope 的取法:
+ *   plan-family → `family:<familyId>` (代码从 plan-ledger 机械附加, 模型不作者化);
+ *   oracle      → {@link OMD_ORACLE_SUBJECTS} 之一 (闭集);
+ *   seat        → 座位坐标 slug (如 `minimax-cn-minimax-m3`);
+ *   chat-correction → situation 的机械 slug (`subjectSlugOf`)。
+ */
+export const OMD_PATTERN_SUBJECT_RE = /^[a-z0-9][a-z0-9._:-]{1,47}$/;
+export const OMD_ORACLE_SUBJECTS = ['verifier', 'acceptance-command', 'self-check', 'frozen-criterion', 'write-set', 'judge', 'env', 'other'] as const;
+
+/** 自由文本 → subject slug (机械, 确定性): 小写, 非字母数字折成 `-`, 截 48。空 → 'other'。 */
+export function subjectSlugOf(text: string): string {
+  const s = text.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
+  // 中文字符不在 RE 里 (RE 只认 ascii): 有中文的先转成长度稳定的短哈希前缀, 保证可比又合法。
+  if (!s) return 'other';
+  if (/[\u4e00-\u9fff]/.test(s)) {
+    let h = 0;
+    for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    return `zh-${h.toString(36)}`;
+  }
+  return s.length < 2 ? `${s}-x` : s;
+}
+
 const OMD_BRANCHES = [
   // 我擅长什么 (领域 + 自评熟练度 spectrum: expert→weak)。
   z.object({
@@ -149,6 +177,8 @@ const OMD_BRANCHES = [
     approach: z.string().min(1),
     outcome: z.enum(['worked', 'failed']),
     scope: z.enum(OMD_PATTERN_SCOPES).optional(),
+    // subject (2026-09-11): identity 第二槽, 见 OMD_PATTERN_SUBJECT_RE 注。optional 同 scope 的理由 (既有写手不带)。
+    subject: z.string().regex(OMD_PATTERN_SUBJECT_RE).optional(),
     ...sourceAnchor,
     ...evidenceField,
     ...confidenceField,
@@ -179,9 +209,17 @@ export const USER_NAMESPACE_IDENTITY_FIELDS: Record<string, readonly string[]> =
 
 export const OMD_NAMESPACE_IDENTITY_FIELDS: Record<string, readonly string[]> = {
   'omd.capability': ['area'],
-  // scope 入键 (裁决 5): 无 scope 的既有行该槽位落 null, 与带 scope 的新行永不同键 —— 不迁移, 30 天自然衰减。
-  'omd.pattern': ['situation', 'approach', 'scope'],
+  // 2026-09-11 (T-H): identity 从 [situation, approach, scope] 收窄到 [scope, subject]。
+  // situation/approach 是自由文本 → 384 条 384 身份, 晋升永不触发。approach/outcome 降为 value:
+  // 同一主题的新教训取代旧教训 (旧行 tombstone + 演化日志), 证据在 identity 上累积。
+  // 不带 subject 的写手/旧行走 OMD_NAMESPACE_LEGACY_IDENTITY_FIELDS 的旧键 (kernel 回落), 不迁移。
+  'omd.pattern': ['scope', 'subject'],
   'omd.limit': ['kind', 'statement'],
+};
+
+/** 旧键 (2026-09-11 前的 omd.pattern identity): subject 缺席的 fact 按它分身, 见 kernel makeIdentityKeyOf。 */
+export const OMD_NAMESPACE_LEGACY_IDENTITY_FIELDS: Record<string, readonly string[]> = {
+  'omd.pattern': ['situation', 'approach', 'scope'],
 };
 
 const namespaceLiterals = (branches: readonly z.ZodObject<z.ZodRawShape>[]): string[] =>
@@ -200,6 +238,7 @@ export const OMD_NAMESPACE_PACK: NamespacePack = {
   branches: OMD_BRANCHES,
   allowedNamespaces: namespaceLiterals(OMD_BRANCHES),
   identityFields: OMD_NAMESPACE_IDENTITY_FIELDS,
+  legacyIdentityFields: OMD_NAMESPACE_LEGACY_IDENTITY_FIELDS,
   banGlobs: [],
 };
 

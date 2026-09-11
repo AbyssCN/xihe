@@ -79,6 +79,7 @@ function fakeCallModel(): (req: ModelRequest) => Promise<ModelResponse> {
               approach: '写「对照主仓基线全量绿」',
               outcome: 'failed',
               scope: 'oracle',
+              subject: 'acceptance-command',
             },
           },
         ],

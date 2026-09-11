@@ -22,6 +22,7 @@ import { computeCost } from '../../model/cost-ledger';
 import { type DreamCandidate, type DreamNamespace } from './validate';
 import { K_leaf } from './merge';
 import { ALLOWED_NAMESPACES } from '../../memory/safeguards/namespaces';
+import { subjectSlugOf } from '../../memory/safeguards/universal-namespaces';
 import { rejectIfProbe, PROBE_SOURCE } from '../dag/credit';
 
 // ---------------------------------------------------------------------------
@@ -103,7 +104,8 @@ export function parseCorrectionPrefix(text: string): ParsedCorrection | null {
  * 第一条: outcome='failed' (做了什么)
  * 第二条: outcome='worked' (应当什么)
  *
- * identity = [situation, approach] 不同 → 互不 supersede, 共存。
+ * identity = [scope, subject] (2026-09-11): 两条同 subject → 第二条 (worked) **取代**第一条 (failed), 旧条进墓志铭;
+ * 召回拿到的是可执行的那条, 做错的那条在演化日志里。同一 situation 再纠一次 → 再取代, 证据累积。
  * provenance 指回纠错 seq。
  * confidence 起手恒为 agent_tentative, source_event_ids = [session:<id>:seq:<n>]。
  */
@@ -126,6 +128,7 @@ export function correctionCandidates(
         approach: parsed.whatWasDone,
         outcome: 'failed',
         scope: 'chat-correction',
+        subject: subjectSlugOf(parsed.situation),
       },
       sessionRef: { sessionId, seq },
       confidence: baseConfidence,
@@ -137,6 +140,7 @@ export function correctionCandidates(
         approach: parsed.whatShouldBe,
         outcome: 'worked',
         scope: 'chat-correction',
+        subject: subjectSlugOf(parsed.situation),
       },
       sessionRef: { sessionId, seq },
       confidence: baseConfidence,
@@ -403,7 +407,9 @@ export async function extractChatSession(
     namespace: raw.namespace as DreamNamespace,
     // scope 机械附加 (裁决 5): chat 语料的 pattern 恒为 chat-correction —— 与 sessionRef/confidence
     // 同族「模型不得作者化」; 模型给了也覆盖。
-    payload: raw.namespace === 'omd.pattern' ? { ...raw.payload, scope: 'chat-correction' } : raw.payload,
+    payload: raw.namespace === 'omd.pattern'
+      ? { ...raw.payload, scope: 'chat-correction', subject: subjectSlugOf(String(raw.payload.situation ?? '')) }
+      : raw.payload,
     sessionRef: { sessionId, seq: raw.seq },
     confidence: {
       level: 'agent_tentative' as const,

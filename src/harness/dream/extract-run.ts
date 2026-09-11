@@ -26,6 +26,7 @@ import { computeCost } from '../../model/cost-ledger';
 import { type DreamCandidate, type DreamNamespace } from './validate';
 import { K_leaf } from './merge';
 import { ALLOWED_NAMESPACES } from '../../memory/safeguards/namespaces';
+import { OMD_ORACLE_SUBJECTS, subjectSlugOf } from '../../memory/safeguards/universal-namespaces';
 import type { EdgeStore, TemporalEdge } from '../memory/types';
 import { rejectIfProbe, PROBE_SOURCE } from '../dag/credit';
 
@@ -349,7 +350,10 @@ export async function extractRunRecord(
       '**输出格式**: 一个 JSON 对象, 包含 candidates 数组。每个 candidate:',
       '- namespace: 必须是以下之一: ' + ALLOWED_NAMESPACES.join(', '),
       '- payload: namespace 对应的字段',
-      '  - omd.pattern: { situation, approach, outcome, scope } —— scope 必填, 只能是 "plan-family" / "oracle" / "seat" (座位形教训成 pattern 时用 "seat")',
+      '  - omd.pattern: { situation, approach, outcome, scope, subject } —— scope 必填, 只能是 "plan-family" / "oracle" / "seat" (座位形教训成 pattern 时用 "seat")',
+      '    subject 必填 = 这条教训的**主题槽** (小写 slug, 2-48 字符): scope=oracle 只能是 ' + OMD_ORACLE_SUBJECTS.join(' / ') + ';',
+      '    scope=seat 写座位坐标 slug (如 minimax-cn-minimax-m3); scope=plan-family 可留空 (代码按 plan-ledger 的 familyId 附加)。',
+      '    同一主题同一结局的新教训会取代旧教训, 所以 subject 要选「下次还会再碰到的那个东西」, 不要写本次任务的专名。',
       '  - omd.limit: { kind: "boundary", statement }',
       '',
       '**重要**:',
@@ -416,9 +420,21 @@ export async function extractRunRecord(
 
   // ── 5. 附加 runRef 与 confidence (代码统一, 模型不得作者化) ──
 
+  const familySubject = input.planLedger?.familyId ? `family:${subjectSlugOf(input.planLedger.familyId)}` : undefined;
   const llmCandidates: DreamCandidate[] = llmRawCandidates.map((raw) => ({
     namespace: raw.namespace as DreamNamespace,
-    payload: raw.payload,
+    // subject (2026-09-11, T-H): plan-family 由代码按 familyId 机械附加 (模型不作者化); 其余 scope 取模型给的 slug 化;
+    // 缺席 → 由 situation 机械 slug 兜底, validate 仍会按 scope 闭集拒 oracle 的乱写。
+    payload:
+      raw.namespace === 'omd.pattern'
+        ? {
+            ...raw.payload,
+            subject:
+              raw.payload.scope === 'plan-family' && familySubject
+                ? familySubject
+                : subjectSlugOf(String(raw.payload.subject ?? raw.payload.situation ?? '')),
+          }
+        : raw.payload,
     runRef: { runId: input.runId, nodeId: undefined },
     confidence: {
       level: 'agent_tentative' as const,

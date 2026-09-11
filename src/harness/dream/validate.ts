@@ -25,7 +25,7 @@
  * identity 字段(supersession 键,merge 用;逐条核过 universal-namespaces.ts:115-128):
  *   user.preference ['category'] · user.interest ['topic'] · user.focus ['focus'] ·
  *   user.expertise ['domain'] · user.trait ['category'] · user.goal ['goal'] ·
- *   omd.capability ['area'] · omd.pattern ['situation','approach'] · omd.limit ['kind','statement']
+ *   omd.capability ['area'] · omd.pattern ['scope','subject'] (2026-09-11 T-H 收窄; 无 subject 走旧键) · omd.limit ['kind','statement']
  * 反例活样本:sink.ts:111 的 `continuity` 不在允许表,生产装配恒被拒、fail-open 静默死 —— 别重蹈。
  *
  * ⚠ 一切盘路径锚 `opts.cwd`(S1 改判③:裸相对路径在临时 cwd 下静默读到主仓生产库)。
@@ -34,7 +34,7 @@ import { join } from 'node:path';
 import type { Database } from 'bun:sqlite';
 import { validateFactWrite } from '../../memory/safeguards/validator';
 import { DEFAULT_SAFEGUARD } from '../../memory/safeguards/namespaces';
-import { OMD_PATTERN_SCOPES } from '../../memory/safeguards/universal-namespaces';
+import { OMD_ORACLE_SUBJECTS, OMD_PATTERN_SCOPES, OMD_PATTERN_SUBJECT_RE } from '../../memory/safeguards/universal-namespaces';
 import { createOmdSessionStore, OMD_SESSION_ID_RE } from '../chat/session-store';
 import { createRunStore, type RunStore } from '../../mcp/run-store';
 
@@ -203,6 +203,15 @@ export async function validateDreamCandidate(
           `scope-invalid: omd.pattern 候选必带受控 scope (${OMD_PATTERN_SCOPES.join('/')}) —— ` +
           `裁决 5: identityKey 依赖自由文本 = 复现机制结构性失效`,
       };
+    }
+    // ── 1c. subject-拒 (2026-09-11, T-H): identity 第二槽必带且合法; oracle 只认闭集。
+    // 证伪方式 (validate.test.ts): 去掉 payload.subject → rejected 含 'subject'; oracle 给闭集外的词 → rejected。
+    const subject = candidate.payload.subject;
+    if (typeof subject !== 'string' || !OMD_PATTERN_SUBJECT_RE.test(subject)) {
+      return { verdict: 'rejected', reason: `subject-invalid: omd.pattern 候选必带 subject slug (${OMD_PATTERN_SUBJECT_RE}) —— T-H: 自由文本身份让晋升永不触发` };
+    }
+    if (scope === 'oracle' && !(OMD_ORACLE_SUBJECTS as readonly string[]).includes(subject)) {
+      return { verdict: 'rejected', reason: `subject-invalid: scope=oracle 的 subject 只认 ${OMD_ORACLE_SUBJECTS.join('/')}, 收到 '${subject}'` };
     }
   }
 
